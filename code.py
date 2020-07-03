@@ -190,21 +190,26 @@ class EInkModule:
         # draw stuff here
         self.dirty_rect = None
         self.add_dirty_rect([64, 64, 64, 64])
+        print('dirty_rect',self.dirty_rect)
         self.ink.set_window(self.dirty_rect)
         self.ink.display()
         self.dirty_rect = None
 
     def add_dirty_rect(self, r):
         if self.dirty_rect is None:
-            self.dirty_rect = [self.width, self.height, 0, 0]
-        x1 = self.dirty_rect[0]
-        y1 = self.dirty_rect[1]
-        x2 = x1 + self.dirty_rect[2]
-        y2 = y1 + self.dirty_rect[3]
-        self.dirty_rect[0] = min(r[0], x1) & 0xf8
-        self.dirty_rect[1] = min(r[1], y1)
-        self.dirty_rect[2] = ((max(r[0] + r[2], x2) - x1) + 0x07) & 0xf8;
-        self.dirty_rect[3] =  (max(r[1] + r[3], y2) - y1);
+            ox1,oy1,ox2,oy2 = (self.width, self.height, 0, 0)
+        else:
+            ox1,oy1,ox2,oy2 = self.dirty_rect
+            ox2 += ox1
+            oy2 += oy1
+        nx1,ny1,nx2,ny2 = r
+        nx2 += nx1
+        ny2 += ny1
+        nx1 =  min(nx1, ox1) & 0xf8
+        ny1 =  min(ny1, oy1)
+        nx2 = (max(nx2, ox2) + 0x07) & 0xf8
+        ny2 =  max(ny2, oy2)
+        self.dirty_rect = [nx1, ny1, nx2 - nx1, ny2 - ny1]
 
 _IL0373_PANEL_SETTING = const(0x00)
 _IL0373_POWER_SETTING = const(0x01)
@@ -238,6 +243,7 @@ class EInkOverride(Adafruit_IL0373):
     def __init__(self, width, height, spi, cs_pin, dc_pin,
                  sramcs_pin, rst_pin, busy_pin):
         self.window_rect = None
+        self.ecs = cs_pin
         super(EInkOverride, self).__init__(width, height, spi,
             cs_pin=cs_pin, dc_pin=dc_pin, sramcs_pin=sramcs_pin,
             rst_pin=rst_pin, busy_pin=busy_pin)
@@ -250,39 +256,35 @@ class EInkOverride(Adafruit_IL0373):
 
     def start_partial_window(self, wrect):
         if wrect is not None:
-            if self.spi_device.try_lock():
-                x,y,w,h = wrect
-                time.sleep(0.002)
-                data = []
-                data.append(x & 0xf8)    # x should be the multiple of 8, the last 3 bit will always be ignored
-                data.append(((x & 0xf8) + w  - 1) | 0x07)
-                data.append(y >> 8)        
-                data.append(y & 0xff)
-                data.append((y + h - 1) >> 8)        
-                data.append((y + h - 1) & 0xff)
-                data.append(0x01)         # Gates scan both inside and outside of the partial window. (default) 
-                self.command(_IL0373_PARTIAL_IN)
-                self.command(_IL0373_PARTIAL_WINDOW, data)
-                time.sleep(0.002)
-                self.spi_device.unlock()
+            x,y,w,h = wrect
+            data = []
+            data.append(x & 0xf8)    # x should be the multiple of 8, the last 3 bit will always be ignored
+            data.append(((x & 0xf8) + w  - 1) | 0x07)
+            data.append(y >> 8)        
+            data.append(y & 0xff)
+            data.append((y + h - 1) >> 8)        
+            data.append((y + h - 1) & 0xff)
+            data.append(0x01)         # Gates scan both inside and outside of the partial window. (default) 
+            self.command(_IL0373_PARTIAL_IN)
+            self.command(_IL0373_PARTIAL_WINDOW, bytearray(data))
 
     def update(self):
         """
         COPY and OVERRIDE the Adafruit_IL0373 code, for the following reasons:
         1. Avoid waiting 15 seconds, when we could be scanning for contacts.
         """
-        if self.window_rect is not None:
-            x,y,w,h = self.window_rect
-            if w > 0 and h > 0:
-                self.command(_IL0373_DISPLAY_REFRESH)
+        # if self.window_rect is not None:
+        #     x,y,w,h = self.window_rect
+        #     if w > 0 and h > 0:
+        self.command(_IL0373_DISPLAY_REFRESH)
 
     def display(self):
         """
         COPY and OVERRIDE the Adafruit_IL0373 code, for the following reasons:
         1. Allow a partial-screen refresh
         """
-        if self.window_rect is None:
-            return
+        # if self.window_rect is None:
+        #     return
 
         self.power_up()
 
@@ -357,7 +359,7 @@ class EInkOverride(Adafruit_IL0373):
 
         self.start_partial_window(self.window_rect)
         self.update()
-## (end of Neopixel section)
+## (end of EInk section)
 ##################################################################
 
 
