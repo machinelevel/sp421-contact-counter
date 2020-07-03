@@ -154,6 +154,26 @@ import digitalio
 import busio
 import terminalio    # needed for tiny font
 
+test_image = {'width':16,
+              'height':16,
+              'black_pixels':bytearray([0b11111111, 0b11111111, \
+                                  0b11111111, 0b11111111, \
+                                  0b11110000, 0b00000000, \
+                                  0b11110000, 0b00000000, \
+                                  0b11110000, 0b00000000, \
+                                  0b11110000, 0b00000000, \
+                                  0b11110000, 0b00000000, \
+                                  0b11111111, 0b11110000, \
+                                  0b11111111, 0b11110000, \
+                                  0b11110000, 0b00000000, \
+                                  0b11110000, 0b00000000, \
+                                  0b11110000, 0b00000000, \
+                                  0b11110000, 0b00000000, \
+                                  0b11110000, 0b00000000, \
+                                  0b11111111, 0b11111111, \
+                                  0b11111111, 0b11111111 \
+                                  ]),
+              }
 class EInkModule:
     def __init__(self):
         self.width = 152
@@ -205,8 +225,15 @@ class EInkModule:
         d.line(0, d.height - 1, d.width - 1, 0, Adafruit_EPD.RED)
 
         print("Draw text")
-        d.text("hello world", 25, 10, Adafruit_EPD.BLACK)
-        self.add_dirty_rect([25, 10, 100, 12])
+        out_text = '{}'.format(self.displayed_unique_contacts)
+        x = 25
+        y = 70
+        w = 8 * len(out_text)
+        h = 12
+        d.text(out_text, x, y, Adafruit_EPD.BLACK)
+        self.add_dirty_rect([x, y, w, h])
+
+        self.draw_simple_image(test_image, 64, 64, do_clear=True)
 
         if self.dirty_rect:
             d.set_window(self.dirty_rect)
@@ -228,6 +255,24 @@ class EInkModule:
         nx2 = (max(nx2, ox2) + 0x07) & 0xf8
         ny2 =  max(ny2, oy2)
         self.dirty_rect = [nx1, ny1, nx2 - nx1, ny2 - ny1]
+
+    def draw_simple_image(self, image_data, x, y, do_clear=True):
+        bp = image_data['black_pixels']
+        w = image_data['width']
+        h = image_data['height']
+        self.add_dirty_rect([x, y, w, h])
+        index = 0
+        for row in range(h):
+            yy = y + row
+            for bytecol in range(w >> 3):
+                bits = bp[index]
+                index += 1
+                xx = x + (bytecol << 3)
+                for bitcol in range(8):
+                    if (bits << bitcol) & 0x80:
+                        self.display.pixel(xx + bitcol, yy, Adafruit_EPD.BLACK)
+                    elif do_clear:
+                        self.display.pixel(xx + bitcol, yy, Adafruit_EPD.WHITE)
 
 _IL0373_PANEL_SETTING = const(0x00)
 _IL0373_POWER_SETTING = const(0x01)
