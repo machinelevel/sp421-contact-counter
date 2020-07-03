@@ -148,6 +148,7 @@ class NeopixelModule:
 ## EInk section: If you're not using EInk,
 ##               you can just delete this whole section
 from adafruit_epd.il0373 import Adafruit_IL0373
+from adafruit_epd.epd import Adafruit_EPD
 from adafruit_epd import mcp_sram
 import digitalio
 import busio
@@ -159,6 +160,7 @@ class EInkModule:
         self.height = 152
         self.eink_needs_update = True
         self.dirty_rect = [0, 0, self.width, self.height]
+        self.dirty_rect = None
         self.min_update_time = 15.0
         self.last_update_time = None
         self.displayed_unique_contacts = -1
@@ -168,10 +170,10 @@ class EInkModule:
         self.sramcs_pin = None # None to use internal memory
         self.rst_pin    = digitalio.DigitalInOut(board.A3)
         self.busy_pin   = None
-        self.ink = EInkOverride(self.width, self.height, self.spi,
-                                cs_pin=self.cs_pin, dc_pin=self.dc_pin,
-                                sramcs_pin=self.sramcs_pin,
-                                rst_pin=self.rst_pin, busy_pin=self.busy_pin)
+        self.display = EInkOverride(self.width, self.height, self.spi,
+                                    cs_pin=self.cs_pin, dc_pin=self.dc_pin,
+                                    sramcs_pin=self.sramcs_pin,
+                                    rst_pin=self.rst_pin, busy_pin=self.busy_pin)
 
     def periodic_update(self, cc):
         num_unique = len(cc.total_unique_contacts)
@@ -188,12 +190,28 @@ class EInkModule:
 
     def draw_everything(self, cc):
         # draw stuff here
-        self.dirty_rect = None
-        self.add_dirty_rect([64, 64, 64, 64])
-        print('dirty_rect',self.dirty_rect)
-        self.ink.set_window(self.dirty_rect)
-        self.ink.display()
-        self.dirty_rect = None
+        d = self.display
+
+        print("Clear buffer")
+        d.fill(Adafruit_EPD.WHITE)
+        d.pixel(10, 100, Adafruit_EPD.BLACK)
+
+        print("Draw Rectangles")
+        d.fill_rect(5, 5, 10, 10, Adafruit_EPD.RED)
+        d.rect(0, 0, 20, 30, Adafruit_EPD.BLACK)
+
+        print("Draw lines")
+        d.line(0, 0, d.width - 1, d.height - 1, Adafruit_EPD.BLACK)
+        d.line(0, d.height - 1, d.width - 1, 0, Adafruit_EPD.RED)
+
+        print("Draw text")
+        d.text("hello world", 25, 10, Adafruit_EPD.BLACK)
+        self.add_dirty_rect([25, 10, 100, 12])
+
+        if self.dirty_rect:
+            d.set_window(self.dirty_rect)
+            d.display()
+            self.dirty_rect = None
 
     def add_dirty_rect(self, r):
         if self.dirty_rect is None:
@@ -273,18 +291,16 @@ class EInkOverride(Adafruit_IL0373):
         COPY and OVERRIDE the Adafruit_IL0373 code, for the following reasons:
         1. Avoid waiting 15 seconds, when we could be scanning for contacts.
         """
-        # if self.window_rect is not None:
-        #     x,y,w,h = self.window_rect
-        #     if w > 0 and h > 0:
-        self.command(_IL0373_DISPLAY_REFRESH)
+        if self.window_rect is not None:
+            self.command(_IL0373_DISPLAY_REFRESH)
 
     def display(self):
         """
         COPY and OVERRIDE the Adafruit_IL0373 code, for the following reasons:
         1. Allow a partial-screen refresh
         """
-        # if self.window_rect is None:
-        #     return
+        if self.window_rect is None:
+            return
 
         self.power_up()
 
