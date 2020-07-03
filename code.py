@@ -375,6 +375,32 @@ class EInkOverride(Adafruit_IL0373):
 
         self.start_partial_window(self.window_rect)
         self.update()
+
+    def power_up(self):
+        """
+        COPY and OVERRIDE the Adafruit_IL0373 code, for the following reasons:
+        1. Just so I can experiment with the startup settings
+        """
+        self.hardware_reset()
+        self.busy_wait()
+
+        self.command(_IL0373_POWER_SETTING, bytearray([0x03, 0x00, 0x2B, 0x2B, 0x09]))
+        self.command(_IL0373_BOOSTER_SOFT_START, bytearray([0x17, 0x17, 0x17]))
+        self.command(_IL0373_POWER_ON)
+
+        self.busy_wait()
+        time.sleep(0.2)
+
+        self.command(_IL0373_PANEL_SETTING, bytearray([0xCF]))
+        self.command(_IL0373_CDI, bytearray([0x37]))
+        self.command(_IL0373_PLL, bytearray([0x29]))
+        _b1 = self._width & 0xFF
+        _b2 = (self._height >> 8) & 0xFF
+        _b3 = self._height & 0xFF
+        self.command(_IL0373_RESOLUTION, bytearray([_b1, _b2, _b3]))
+        self.command(_IL0373_VCM_DC_SETTING, bytearray([0x0A]))
+        time.sleep(0.05)
+
 ## (end of EInk section)
 ##################################################################
 
