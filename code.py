@@ -62,6 +62,7 @@ class ContactCounts:
         self.persistent_data = {'unique_counts':0,'sample_minutes':0}
         self.tried_remounting_storage = False
         self.reset_counts_timer = 0
+        self.count_file_name = '/counter_data.txt'
         self.load_persistent_counter_data_at_startup()
 
     def periodic_update(self, buttons, neo_module=None):
@@ -105,10 +106,10 @@ class ContactCounts:
 
     def load_persistent_counter_data_at_startup(self):
         try:
-            with open('/counter_data.txt','r') as f:
+            with open(self.count_file_name,'r') as f:
                 # eval is unsafe, but here it's ok
                 self.persistent_data.update(eval(f.read()))
-                print('loaded data:',self.persistent_data)
+                print('loaded data:',self.count_file_name,self.persistent_data)
             self.prior_unique_count = self.persistent_data['unique_counts']
             self.sample_seconds = 60 * self.persistent_data['sample_minutes']
         except:
@@ -116,9 +117,9 @@ class ContactCounts:
 
     def save_persistent_data(self):
         try:
-            with open('/counter_data.txt','w') as f:
+            with open(self.count_file_name,'w') as f:
                 f.write(str(self.persistent_data))
-            print('saved data:',self.persistent_data)
+            print('saved data:',self.count_file_name,self.persistent_data)
         except:
             print('failed to save data')
 
@@ -131,9 +132,9 @@ class ContactCounts:
         return '{}d {}h {}m {}s'.format(days, hrs, mins, secs)
 
     def debug_print(self, buttons):
-        print('scan {}: {}/{} contacts {}'.format(self.scan_serial_number,
+        print('scan {}: {}/{}+{} contacts {}'.format(self.scan_serial_number,
                 len(self.current_contacts), len(self.total_unique_contacts),
-                self.timestr(time.time() - self.start_time)))
+                self.prior_unique_count, self.timestr(time.time() - self.start_time)))
         if buttons.left():
             print('Left button is down')
         if buttons.right():
