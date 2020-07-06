@@ -39,7 +39,7 @@ def main():
     buttons = ButtonsModule()
 
     while True:
-        contact_counter.periodic_update(buttons)
+        contact_counter.periodic_update(buttons, neo_module)
         bt_module.periodic_update(contact_counter, buttons)
         neo_module.periodic_update(contact_counter, buttons)
         eink_module.periodic_update(contact_counter, buttons)
@@ -64,10 +64,13 @@ class ContactCounts:
         self.reset_counts_timer = 0
         self.load_persistent_counter_data_at_startup()
 
-    def periodic_update(self, buttons):
+    def periodic_update(self, buttons, neo_module=None):
         if buttons.left() and buttons.right():
             self.reset_counts_timer += 1
             if self.reset_counts_timer > 3:
+                if neo_module:
+                    neo_module.set_all((0,64,255))
+                    time.sleep(0.5)
                 self.reset_counts_to_zero()
                 self.reset_counts_timer = 0
         else:
@@ -211,6 +214,11 @@ class NeopixelModule:
                     self.pixels[i] = (0,0,0)
             self.pixels.show()
             self.pixels_need_update = False
+
+    def set_all(self, color):
+        for i in range(10):
+            self.pixels[i] = color
+        self.pixels.show()
 
     def colorwheel255(self, pos):
         # Input a value 0 to 255 to get a color value.
