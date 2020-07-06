@@ -36,24 +36,53 @@ def main():
     bt_module = BluetoothModule()
     neo_module = NeopixelModule()
     eink_module = EInkModule()
+    buttons = ButtonsModule()
 
     while True:
-        bt_module.periodic_update(contact_counter)
-        neo_module.periodic_update(contact_counter)
-        eink_module.periodic_update(contact_counter)
-        contact_counter.debug_print()
+        contact_counter.periodic_update(buttons)
+        bt_module.periodic_update(contact_counter, buttons)
+        neo_module.periodic_update(contact_counter, buttons)
+        eink_module.periodic_update(contact_counter, buttons)
         time.sleep(1.0)
 
 ##################################################################
 ## ContactCounts is the class which tracks the main counting data
+import storage
+
 class ContactCounts:
     def __init__(self):
         self.start_time = time.time()
         self.scan_serial_number = 0
+        self.sample_seconds = 0
         self.total_unique_contacts = set()
         self.current_contacts = set()
         self.prev_current_contacts = set()
         self.prev_num_total_unique_contacts = 0
+        self.prior_unique_count = 0
+        self.persistent_data = {'unique_counts':0,'sample_minutes':0}
+        self.tried_remounting_storage = False
+        self.reset_counts_timer = 0
+        self.load_persistent_counter_data_at_startup()
+
+    def periodic_update(self, buttons):
+        if buttons.left() and buttons.right():
+            self.reset_counts_timer += 1
+            if self.reset_counts_timer > 3:
+                self.reset_counts_to_zero()
+                self.reset_counts_timer = 0
+        else:
+            self.reset_counts_timer = 0
+
+        self.debug_print(buttons)
+
+    def load_persistent_counter_data(self):
+        self.prior_unique_count = 0
+
+    def reset_counts_to_zero(self):
+        self.total_unique_contacts.clear()
+        self.prior_unique_count = 0
+        self.sample_seconds = 0
+        self.update_persistent_data()
 
     def update_contacts(self, new_contacts):
         self.scan_serial_number += 1
@@ -61,6 +90,34 @@ class ContactCounts:
         self.prev_current_contacts = self.current_contacts
         self.current_contacts = set(new_contacts)
         self.total_unique_contacts.update(self.current_contacts)
+        self.update_persistent_data()
+
+    def update_persistent_data(self):
+        # TODO: optimize this for the fact that most of the time it won't change
+        pd = {'unique_counts':len(self.total_unique_contacts) + self.prior_unique_count,
+              'sample_minutes':self.sample_seconds // 60}
+        if pd != self.persistent_data:
+            self.persistent_data = pd
+            self.save_persistent_data()
+
+    def load_persistent_counter_data_at_startup(self):
+        try:
+            with open('/counter_data.txt','r') as f:
+                # eval is unsafe, but here it's ok
+                self.persistent_data.update(eval(f.read()))
+                print('loaded data:',self.persistent_data)
+            self.prior_unique_count = self.persistent_data['unique_counts']
+            self.sample_seconds = 60 * self.persistent_data['sample_minutes']
+        except:
+            print('no data to load')
+
+    def save_persistent_data(self):
+        try:
+            with open('/counter_data.txt','w') as f:
+                f.write(str(self.persistent_data))
+            print('saved data:',self.persistent_data)
+        except:
+            print('failed to save data')
 
     def timestr(self, t):
         t = int(t)
@@ -70,12 +127,41 @@ class ContactCounts:
         secs = t % 60
         return '{}d {}h {}m {}s'.format(days, hrs, mins, secs)
 
-    def debug_print(self):
+    def debug_print(self, buttons):
         print('scan {}: {}/{} contacts {}'.format(self.scan_serial_number,
                 len(self.current_contacts), len(self.total_unique_contacts),
                 self.timestr(time.time() - self.start_time)))
+        if buttons.left():
+            print('Left button is down')
+        if buttons.right():
+            print('Right button is down')
+        if buttons.switch():
+            print('Switch is to the left')
 ##
 ##################################################################
+
+
+##################################################################
+## Buttons section: If you're not using buttons,
+##                  you can just delete this whole section
+class ButtonsModule:
+    def __init__(self):
+        self.left_button = digitalio.DigitalInOut(board.D4)
+        self.right_button = digitalio.DigitalInOut(board.D5)
+        self.slide_switch = digitalio.DigitalInOut(board.D7)
+        self.left_button.switch_to_input(pull=digitalio.Pull.DOWN)
+        self.right_button.switch_to_input(pull=digitalio.Pull.DOWN)
+        self.slide_switch.switch_to_input(pull=digitalio.Pull.UP)
+    def left(self):
+        return self.left_button.value
+    def right(self):
+        return self.right_button.value
+    def switch(self):
+        return self.slide_switch.value
+## (end of Buttons section)
+##################################################################
+
+
 
 ##################################################################
 ## Bluetooth section: If you're not using Bluetooth,
@@ -90,7 +176,7 @@ class BluetoothModule:
         self.rssi = -80   # -80 is good, -20 is very close, -120 is very far away
         self.scan_timeout = 0.25
 
-    def periodic_update(self, cc):
+    def periodic_update(self, cc, buttons):
         scan_result = self.radio.start_scan(timeout=self.scan_timeout,
                                             minimum_rssi=self.rssi)
         contacts = [s.address for s in scan_result]
@@ -112,7 +198,7 @@ class NeopixelModule:
                                         brightness=0.2, auto_write=False)
         self.pixels_need_update = True
 
-    def periodic_update(self, cc):
+    def periodic_update(self, cc, buttons):
         if len(cc.current_contacts) != len(cc.prev_current_contacts):
             self.pixels_need_update = True
 
@@ -223,8 +309,8 @@ class EInkModule:
                                     sramcs_pin=self.sramcs_pin,
                                     rst_pin=self.rst_pin, busy_pin=self.busy_pin)
 
-    def periodic_update(self, cc):
-        num_unique = len(cc.total_unique_contacts)
+    def periodic_update(self, cc, buttons):
+        num_unique = len(cc.total_unique_contacts) + cc.prior_unique_count
         if num_unique != self.displayed_unique_contacts:
             self.eink_needs_update = True;
         update_time_ok = self.last_update_time is None or \
