@@ -183,8 +183,8 @@ class ContactCounts:
             print('Left button is down')
         if buttons.right():
             print('Right button is down')
-        if buttons.switch():
-            print('Switch is to the left')
+        # if buttons.switch():
+        #     print('Switch is to the left')
 ##
 ##################################################################
 
@@ -433,6 +433,7 @@ class EInkModule:
         # d.text(out_text, x, y, Adafruit_EPD.BLACK)
         # self.add_dirty_rect([x, y, w, h])
 
+        print('draw big number')
         self.draw_big_number(self.displayed_unique_contacts, 76, 76, font_motor, do_clear=True)
         self.draw_big_number(self.displayed_unique_contacts, 76, 76, font_motor, do_clear=False)
 
@@ -440,6 +441,7 @@ class EInkModule:
             d.set_window(self.dirty_rect)
             d.display()
             self.dirty_rect = None
+        print('draw done')
 
     def add_dirty_rect(self, r):
         if self.dirty_rect is None:
@@ -556,6 +558,7 @@ class EInkOverride(Adafruit_IL0373):
         1. Avoid waiting 15 seconds, when we could be scanning for contacts.
         """
         if self.window_rect is not None:
+            print('update()...')
             self.command(_IL0373_DISPLAY_REFRESH)
 
     def display(self):
@@ -565,6 +568,8 @@ class EInkOverride(Adafruit_IL0373):
         """
         if self.window_rect is None:
             return
+
+        print('display()...')
 
         self.power_up()
 
