@@ -74,47 +74,113 @@ class Encounter:
         self.contact_duration = 0.0        # Integration over time
         self.is_new_device = is_new_device # First contact for this device
 
-    def periodic_update(self, last_time, this_time):
-        self.last_seen = this_time
-        self.contact_duration += this_time - last_time
-
 class ContactCounts:
     def __init__(self):
         self.startup_time = time.monotonic()
         self.current_encounters = {}
         self.persistent_data = {'unique_counts':0,'sample_seconds':0}
         self.count_file_name = '/counter_data.txt'
+        self.bloom_file_name = '/bloom_data.txt'
         self.need_save = False
+        self.bloom = None
         self.reset_counts_to_zero()
+        self.load_or_create_bloom_at_startup()
         self.load_persistent_counter_data_at_startup()
         self.reset_button_hold_timer = 0
-        self.bloom = set() # todo replace with bloom
-
-        # self.sample_seconds = 0
-        # self.total_unique_contacts = set()
-        # self.current_contacts = set()
-        # self.prev_current_contacts = set()
-        # self.prev_num_total_unique_contacts = 0
-        # self.prior_unique_count = 0
-        # self.persistent_data = {'unique_counts':0,'sample_minutes':0}
-        # self.tried_remounting_storage = False
 
     def periodic_update(self, buttons, neo_module=None):
+        if self.need_save:
+            self.save_persistent_data()
+            self.need_save = False
+
         # hold both buttons down to reset counts
         if buttons.left() and buttons.right():
             self.reset_button_hold_timer += 1
-            if self.reset_counts_timer > 3:
+            if self.reset_button_hold_timer > 3:
                 if neo_module:
                     neo_module.set_all((0,64,255))
                     time.sleep(0.25)
                     neo_module.set_all((0,0,0))
                 self.reset_counts_to_zero()
                 self.save_persistent_data()
+                self.save_bloom()
                 self.reset_button_hold_timer = 0
         else:
             self.reset_button_hold_timer = 0
 
+    def load_or_create_bloom_at_startup(self):
+        self.bloom = bytearray(24 * 1024)
+        self.clear_bloom()
+        # try to load the data
+        try:
+            with open(self.bloom_file_name,'rb') as f:
+                rsize = 256
+                pos = 0
+                while pos < len(self.bloom):
+                    data = f.read(rsize)
+                    self.bloom[pos:pos+rsize] = data
+                    test_offset += rsize
+            print('Loaded bloom file ok')
+        except Exception as ex:
+            print('Unable to load bloom file, creating new',ex)
+            self.save_bloom()
+
+    def save_bloom(self, byte_list=None):
+        if byte_list is None:
+            try:
+                with open(self.bloom_file_name,'wb') as f:
+                    f.write(self.bloom)
+                print('Saved complete bloom file')
+            except Exception as ex:
+                print('Unable to save full bloom file',ex)
+        else:
+            try:
+                with open(self.bloom_file_name,'rb+') as f:
+                    for pos in byte_list:
+                        f.seek(pos)
+                        f.write(self.bloom[pos:pos+1])
+                print('Saved bloom bytes',byte_list)
+            except Exception as ex:
+                print('Unable to save partial bloom file',ex)
+        if 0:
+            self.verify_bloom()
+
+    def verify_bloom(self):
+        try:
+            test_size = 256
+            test_offset = 0
+            with open(self.bloom_file_name,'rb') as f:
+                while test_offset < len(self.bloom):
+                    chk = f.read(test_size)
+                    assert chk == self.bloom[test_offset:test_offset+test_size],'verify mismatch'
+                    test_offset += test_size
+            print('Verified bloom file ok')
+        except Exception as ex:
+            print('Unable to verify bloom file',ex)
+
+
+    def clear_bloom(self):
+        if self.bloom is not None:
+            for i in range(len(self.bloom)):
+                self.bloom[i] = 0
+
+    def add_bloom(self, addr):
+        update_bytes = []
+        is_new = False
+        for field in range(3):
+            bit_index = (addr[field * 2] << 8) | addr[field * 2 + 1]
+            pos = (bit_index >> 3) + field * 8192
+            mask = 1 << (bit_index & 7)
+            if (self.bloom[pos] & mask) == 0:
+                self.bloom[pos] |= mask
+                update_bytes.append(pos)
+                is_new = True
+        if is_new:
+            self.save_bloom(update_bytes)
+        return is_new
+
     def reset_counts_to_zero(self):
+        self.clear_bloom()
         self.current_encounters.clear()
         self.sample_last_time = self.sample_start_time = time.monotonic()
         self.scan_serial_number = 0
@@ -122,13 +188,11 @@ class ContactCounts:
         self.persistent_data['sample_seconds'] = 0
 
     def check_if_new(self, addr):
-        if addr in self.bloom:
-            return False
-        else:
+        is_new = self.add_bloom(addr)
+        if is_new:
             self.persistent_data['unique_counts'] += 1
-            self.bloom.add(addr)
             self.need_save = True
-            return True
+        return is_new
 
     def get_total_unique(self):
         return self.persistent_data['unique_counts']
@@ -137,11 +201,13 @@ class ContactCounts:
         this_time = time.monotonic()
         self.persistent_data['sample_seconds'] += this_time - self.sample_last_time
         for addr in new_contacts:
-            if addr in self.current_encounters:
-                self.current_encounters[addr].periodic_update(self.sample_last_time, this_time)
+            contact = self.current_encounters.get(addr, None)
+            if contact is not None:
+                contact.last_seen = this_time
+                contact.contact_duration += this_time - self.sample_last_time
             else:
                 self.current_encounters[addr] = Encounter(self.check_if_new(addr))
-        self.sample_last_time = time.monotonic()
+        self.sample_last_time = this_time
 
         # Delete any old contacts
         for addr in list(self.current_encounters.keys()):
@@ -154,16 +220,16 @@ class ContactCounts:
                 # eval is unsafe, but here it's ok
                 self.persistent_data.update(eval(f.read()))
                 print('loaded data:',self.count_file_name,self.persistent_data)
-        except:
-            print('no data to load')
+        except Exception as ex:
+            print('no data to load',ex)
 
     def save_persistent_data(self):
         try:
             with open(self.count_file_name,'w') as f:
                 f.write(str(self.persistent_data))
             print('saved data:',self.count_file_name,self.persistent_data)
-        except:
-            print('failed to save data')
+        except Exception as ex:
+            print('failed to save data',ex)
 
     def timestr(self, t):
         t = int(t)
