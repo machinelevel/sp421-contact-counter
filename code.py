@@ -198,7 +198,7 @@ class BluetoothModule:
     def periodic_update(self, cc, buttons):
         scan_result = self.radio.start_scan(timeout=self.scan_timeout,
                                             minimum_rssi=self.rssi)
-        contacts = [s.address for s in scan_result]
+        contacts = [s.address.address_bytes for s in scan_result]
         cc.update_contacts(contacts)
 
         # update Bluefruit Connect
