@@ -27,6 +27,7 @@ License:
 """
 import time
 import board
+import gc
 
 def main():
     """
@@ -43,6 +44,7 @@ def main():
         bt_module.periodic_update(contact_counter, buttons)
         neo_module.periodic_update(contact_counter, buttons)
         eink_module.periodic_update(contact_counter, buttons)
+        gc.collect()
         time.sleep(1.0)
 
 ##################################################################
@@ -132,9 +134,11 @@ class ContactCounts:
         return '{}d {}h {}m {}s'.format(days, hrs, mins, secs)
 
     def debug_print(self, buttons):
-        print('scan {}: {}/{}+{} contacts {}'.format(self.scan_serial_number,
+        self.current_debug_out = 'scan {}: {}/{}+{} contacts {} free-mem:{}'.format(self.scan_serial_number,
                 len(self.current_contacts), len(self.total_unique_contacts),
-                self.prior_unique_count, self.timestr(time.time() - self.start_time)))
+                self.prior_unique_count, self.timestr(time.time() - self.start_time),
+                gc.mem_free())
+        print(self.current_debug_out)
         if buttons.left():
             print('Left button is down')
         if buttons.right():
