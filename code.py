@@ -27,6 +27,7 @@ License:
 """
 import time
 import board
+import gc
 
 def main():
     """
@@ -43,6 +44,7 @@ def main():
         bt_module.periodic_update(contact_counter, buttons)
         neo_module.periodic_update(contact_counter, buttons)
         eink_module.periodic_update(contact_counter, buttons)
+        gc.collect()
         time.sleep(1.0)
 
 ##################################################################
@@ -132,9 +134,11 @@ class ContactCounts:
         return '{}d {}h {}m {}s'.format(days, hrs, mins, secs)
 
     def debug_print(self, buttons):
-        print('scan {}: {}/{}+{} contacts {}'.format(self.scan_serial_number,
+        self.current_debug_out = 'scan {}: {}/{}+{} contacts {} free-mem:{}'.format(self.scan_serial_number,
                 len(self.current_contacts), len(self.total_unique_contacts),
-                self.prior_unique_count, self.timestr(time.time() - self.start_time)))
+                self.prior_unique_count, self.timestr(time.time() - self.start_time),
+                gc.mem_free())
+        print(self.current_debug_out)
         if buttons.left():
             print('Left button is down')
         if buttons.right():
@@ -171,6 +175,11 @@ class ButtonsModule:
 ## Bluetooth section: If you're not using Bluetooth,
 ##                    you can just delete this whole section
 import adafruit_ble
+from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
+from adafruit_ble.services.nordic import UARTService
+from adafruit_bluefruit_connect.packet import Packet
+# Only the packet classes that are imported will be known to Packet.
+# from adafruit_bluefruit_connect.color_packet import ColorPacket
 
 class BluetoothModule:
     def __init__(self):
@@ -180,11 +189,43 @@ class BluetoothModule:
         self.rssi = -80   # -80 is good, -20 is very close, -120 is very far away
         self.scan_timeout = 0.25
 
+        # set up Bluefruit Connect
+        self.uart_server = UARTService()
+        self.advertisement = ProvideServicesAdvertisement(self.uart_server)
+        self.was_connected = False
+        self.radio.start_advertising(self.advertisement)
+
     def periodic_update(self, cc, buttons):
         scan_result = self.radio.start_scan(timeout=self.scan_timeout,
                                             minimum_rssi=self.rssi)
         contacts = [s.address for s in scan_result]
         cc.update_contacts(contacts)
+
+        # update Bluefruit Connect
+        if self.radio.connected:
+            self.was_connected = True
+            # packet = Packet.from_stream(self.uart_server)
+            # if isinstance(packet, ColorPacket):
+            #     print(packet.color)
+            # INCOMING (RX) check for incoming text
+            if self.uart_server.in_waiting:
+                raw_bytes = self.uart_server.read(self.uart_server.in_waiting)
+                text = raw_bytes.decode().strip()
+                # print("raw bytes =", raw_bytes)
+                print("RX:", text)
+            # OUTGOING (TX) periodically send text
+            text = cc.current_debug_out
+            #text = '\n{},{}\n'.format(len(cc.current_contacts), cc.prior_unique_count + len(cc.total_unique_contacts))
+            #print("TX:", text.strip())
+            self.uart_server.write(text.encode())
+
+
+        elif self.was_connected:
+            self.was_connected = False
+            self.radio.start_advertising(self.advertisement)
+
+
+
 ## (end of Bluetooth section)
 ##################################################################
 
