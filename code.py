@@ -42,7 +42,7 @@ def main():
     buttons = ButtonsModule()
 
     while True:
-        contact_counter.periodic_update(buttons, neo_module)
+        contact_counter.periodic_update(buttons, neo_module, eink_module)
         bt_module.periodic_update(contact_counter, buttons)
         neo_module.periodic_update(contact_counter, buttons)
         eink_module.periodic_update(contact_counter, buttons)
@@ -160,15 +160,20 @@ class ContactCounts:
         self.persistent_data = {'unique_counts':0,'sample_seconds':0}
         self.count_file_name = '/counter_data.txt'
         self.need_save = False
+        self.is_low_power = False
         self.bloom = Bloom('/bloom_data.txt')
         self.reset_counts_to_zero()
         self.load_persistent_counter_data_at_startup()
         self.reset_button_hold_timer = 0
 
-    def periodic_update(self, buttons, neo_module=None):
+    def periodic_update(self, buttons, neo_module=None, eink_module=None):
         if self.need_save:
             self.save_persistent_data()
             self.need_save = False
+
+        # enggage power saver
+        if buttons.switch() != self.is_low_power:
+            self.set_low_power(buttons.switch(), neo_module, eink_module)
 
         # hold both buttons down to reset counts
         if buttons.left() and buttons.right():
@@ -185,6 +190,17 @@ class ContactCounts:
                 self.reset_button_hold_timer = 0
         else:
             self.reset_button_hold_timer = 0
+
+    def set_low_power(self, low_power, neo_module=None, eink_module=None):
+        self.is_low_power = low_power
+        if self.is_low_power:
+            print('(switch to low power mode)')
+        else:
+            print('(switch to high power mode)')
+        if neo_module:
+            neo_module.set_low_power(low_power)
+        if eink_module:
+            eink_module.set_low_power(low_power)
 
     def reset_counts_to_zero(self):
         self.current_encounters.clear()
@@ -250,13 +266,14 @@ class ContactCounts:
                 len(self.current_encounters), self.persistent_data['unique_counts'],
                 self.timestr(self.persistent_data['sample_seconds']),
                 gc.mem_free())
-        print(self.current_debug_out)
-        if buttons.left():
-            print('Left button is down')
-        if buttons.right():
-            print('Right button is down')
-        # if buttons.switch():
-        #     print('Switch is to the left')
+        if not self.is_low_power:
+            print(self.current_debug_out)
+            if buttons.left():
+                print('Left button is down')
+            if buttons.right():
+                print('Right button is down')
+            # if buttons.switch():
+            #     print('Switch is to the left')
 ##
 ##################################################################
 
@@ -352,6 +369,9 @@ class NeopixelModule:
         self.current_displayed_count = -1
 
     def periodic_update(self, cc, buttons):
+        if cc.is_low_power:
+            return
+
         if len(cc.current_encounters) != self.current_displayed_count:
             self.pixels_need_update = True
 
@@ -364,6 +384,12 @@ class NeopixelModule:
                     self.pixels[i] = (0,0,0)
             self.pixels.show()
             self.pixels_need_update = False
+
+    def set_low_power(self, low_power):
+        if low_power:
+            self.set_all((0,0,0))
+        else:
+            self.pixels_need_update = True
 
     def set_all(self, color):
         for i in range(10):
@@ -480,6 +506,14 @@ class EInkModule:
             self.eink_needs_update = False
             self.last_update_time = time.monotonic()
 
+    def set_low_power(self, low_power):
+        if low_power:
+            self.min_update_time = 60 * 5
+            self.display.power_down()
+        else:
+            self.min_update_time = 15.0
+            self.eink_needs_update = True
+
     def draw_everything(self, cc):
         # draw stuff here
         d = self.display
@@ -513,6 +547,8 @@ class EInkModule:
             d.set_window(self.dirty_rect)
             d.display()
             self.dirty_rect = None
+            if cc.is_low_power:
+                d.power_down()
         print('draw done')
 
     def add_dirty_rect(self, r):
