@@ -62,7 +62,7 @@ setting_end_encounter_time = 5 * 60 # End an encounter after this many seconds o
 
 ##################################################################
 ## ContactCounts is the class which tracks the main counting data
-import storage
+#import storage
 
 class Encounter:
     '''
@@ -74,17 +74,94 @@ class Encounter:
         self.contact_duration = 0.0        # Integration over time
         self.is_new_device = is_new_device # First contact for this device
 
+class Bloom:
+    '''
+    The bloom is a structure which tracks whether or not we've seen an address before
+    '''
+    def __init__(self, filename):
+        self.filename = filename
+        self.do_verify = True
+        self.bits = bytearray(24 * 1024)
+        self.clear()
+        self.load()
+
+    def load(self):
+        # try to load the data
+        try:
+            with open(self.filename,'rb') as f:
+                rsize = 256
+                pos = 0
+                while pos < len(self.bits):
+                    data = f.read(rsize)
+                    self.bits[pos:pos+rsize] = data
+                    pos += rsize
+            print('Loaded bloom file ok')
+        except Exception as ex:
+            print('Unable to load bloom file, creating new',ex)
+            self.save()
+
+    def save(self, byte_list=None):
+        if byte_list is None:
+            try:
+                with open(self.filename,'wb') as f:
+                    f.write(self.bits)
+                print('Saved complete bloom file')
+            except Exception as ex:
+                print('Unable to save full bloom file',ex)
+        else:
+            try:
+                with open(self.filename,'rb+') as f:
+                    for pos in byte_list:
+                        f.seek(pos)
+                        f.write(self.bits[pos:pos+1])
+                print('Saved bloom bytes',byte_list)
+            except Exception as ex:
+                print('Unable to save partial bloom file',ex)
+        self.verify()
+
+    def verify(self):
+        if self.do_verify:
+            try:
+                test_size = 256
+                test_offset = 0
+                with open(self.filename,'rb') as f:
+                    while test_offset < len(self.bits):
+                        chk = f.read(test_size)
+                        assert chk == self.bits[test_offset:test_offset+test_size],'verify mismatch'
+                        test_offset += test_size
+                print('Verified bloom file ok')
+            except Exception as ex:
+                print('Unable to verify bloom file',ex)
+
+    def clear(self):
+        for i in range(len(self.bits)):
+            self.bits[i] = 0
+
+    def add(self, addr):
+        update_bytes = []
+        is_new = False
+        for field in range(3):
+            bit_index = (addr[field * 2] << 8) | addr[field * 2 + 1]
+            pos = (bit_index >> 3) + field * 8192
+            mask = 1 << (bit_index & 7)
+            if (self.bits[pos] & mask) == 0:
+                self.bits[pos] |= mask
+                update_bytes.append(pos)
+                is_new = True
+        if is_new:
+            self.save(update_bytes)
+        return is_new
+
+
 class ContactCounts:
     def __init__(self):
         self.startup_time = time.monotonic()
         self.current_encounters = {}
         self.persistent_data = {'unique_counts':0,'sample_seconds':0}
         self.count_file_name = '/counter_data.txt'
-        self.bloom_file_name = '/bloom_data.txt'
         self.need_save = False
-        self.bloom = None
+        self.bloom = Bloom('/bloom_data.txt')
         self.reset_counts_to_zero()
-        self.load_or_create_bloom_at_startup()
         self.load_persistent_counter_data_at_startup()
         self.reset_button_hold_timer = 0
 
@@ -103,84 +180,13 @@ class ContactCounts:
                     neo_module.set_all((0,0,0))
                 self.reset_counts_to_zero()
                 self.save_persistent_data()
-                self.save_bloom()
+                self.bloom.clear()
+                self.bloom.save()
                 self.reset_button_hold_timer = 0
         else:
             self.reset_button_hold_timer = 0
 
-    def load_or_create_bloom_at_startup(self):
-        self.bloom = bytearray(24 * 1024)
-        self.clear_bloom()
-        # try to load the data
-        try:
-            with open(self.bloom_file_name,'rb') as f:
-                rsize = 256
-                pos = 0
-                while pos < len(self.bloom):
-                    data = f.read(rsize)
-                    self.bloom[pos:pos+rsize] = data
-                    test_offset += rsize
-            print('Loaded bloom file ok')
-        except Exception as ex:
-            print('Unable to load bloom file, creating new',ex)
-            self.save_bloom()
-
-    def save_bloom(self, byte_list=None):
-        if byte_list is None:
-            try:
-                with open(self.bloom_file_name,'wb') as f:
-                    f.write(self.bloom)
-                print('Saved complete bloom file')
-            except Exception as ex:
-                print('Unable to save full bloom file',ex)
-        else:
-            try:
-                with open(self.bloom_file_name,'rb+') as f:
-                    for pos in byte_list:
-                        f.seek(pos)
-                        f.write(self.bloom[pos:pos+1])
-                print('Saved bloom bytes',byte_list)
-            except Exception as ex:
-                print('Unable to save partial bloom file',ex)
-        if 0:
-            self.verify_bloom()
-
-    def verify_bloom(self):
-        try:
-            test_size = 256
-            test_offset = 0
-            with open(self.bloom_file_name,'rb') as f:
-                while test_offset < len(self.bloom):
-                    chk = f.read(test_size)
-                    assert chk == self.bloom[test_offset:test_offset+test_size],'verify mismatch'
-                    test_offset += test_size
-            print('Verified bloom file ok')
-        except Exception as ex:
-            print('Unable to verify bloom file',ex)
-
-
-    def clear_bloom(self):
-        if self.bloom is not None:
-            for i in range(len(self.bloom)):
-                self.bloom[i] = 0
-
-    def add_bloom(self, addr):
-        update_bytes = []
-        is_new = False
-        for field in range(3):
-            bit_index = (addr[field * 2] << 8) | addr[field * 2 + 1]
-            pos = (bit_index >> 3) + field * 8192
-            mask = 1 << (bit_index & 7)
-            if (self.bloom[pos] & mask) == 0:
-                self.bloom[pos] |= mask
-                update_bytes.append(pos)
-                is_new = True
-        if is_new:
-            self.save_bloom(update_bytes)
-        return is_new
-
     def reset_counts_to_zero(self):
-        self.clear_bloom()
         self.current_encounters.clear()
         self.sample_last_time = self.sample_start_time = time.monotonic()
         self.scan_serial_number = 0
@@ -188,7 +194,7 @@ class ContactCounts:
         self.persistent_data['sample_seconds'] = 0
 
     def check_if_new(self, addr):
-        is_new = self.add_bloom(addr)
+        is_new = self.bloom.add(addr)
         if is_new:
             self.persistent_data['unique_counts'] += 1
             self.need_save = True
