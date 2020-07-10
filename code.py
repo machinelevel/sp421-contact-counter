@@ -29,6 +29,9 @@ import time
 import board
 import gc
 
+def addrs_to_hex(addrs):
+    return [''.join('{:02x}:'.format(x) for x in addr)[:-1] for addr in addrs]
+
 def main():
     """
     Initialize the modules, and then loop forever.
@@ -482,6 +485,7 @@ class EInkModule:
         self.min_update_time = 15.0
         self.last_update_time = None
         self.displayed_unique_contacts = -1
+        self.displaying_low_batt_warning = False
         self.spi = busio.SPI(board.SCL, MOSI=board.SDA)
         self.cs_pin     = digitalio.DigitalInOut(board.RX)
         self.dc_pin     = digitalio.DigitalInOut(board.TX)
@@ -500,19 +504,49 @@ class EInkModule:
         update_time_ok = self.last_update_time is None or \
                          time.monotonic() - self.last_update_time > self.min_update_time
 
+        self.check_low_battery_warning(cc)
+
         if self.eink_needs_update and update_time_ok:
             self.displayed_unique_contacts = num_unique
             self.draw_everything(cc)
             self.eink_needs_update = False
             self.last_update_time = time.monotonic()
 
+    def check_low_battery_warning(self, cc):
+        low_batt = self.display.check_low_battery_warning()
+        if low_batt:
+            print('LOW BATTERY WARNING:')
+        if self.displaying_low_batt_warning != low_batt:
+            self.displaying_low_batt_warning = low_batt
+            message = 'LOW BATTERY' if low_batt else '           '
+            self.draw_tiny_text((24, 24, message))
+            if low_batt:
+                time.sleep(15)
+
+
     def set_low_power(self, low_power):
         if low_power:
             self.min_update_time = 60 * 5
+            self.display.busy_wait()
+            time.sleep(0.2)
             self.display.power_down()
         else:
             self.min_update_time = 15.0
             self.eink_needs_update = True
+        # Show the icon
+        message = 'BATT SAVER MODE' if low_power else '               '
+        self.draw_tiny_text((24, 36, message))
+        time.sleep(5)
+
+    def draw_tiny_text(self, ttxt):
+        x,y,message = ttxt
+        w = len(message) * 6
+        h = 8
+        d = self.display
+        d.fill_rect(x, y, w, h, Adafruit_EPD.WHITE)
+        d.text(message, x, y, Adafruit_EPD.BLACK)
+        d.set_window((x,y,w,h))
+        d.display()
 
     def draw_everything(self, cc):
         # draw stuff here
@@ -548,6 +582,8 @@ class EInkModule:
             d.display()
             self.dirty_rect = None
             if cc.is_low_power:
+                d.busy_wait()
+                time.sleep(0.2)
                 d.power_down()
         print('draw done')
 
@@ -631,6 +667,8 @@ _IL0373_PARTIAL_WINDOW = const(0x90)
 _IL0373_PARTIAL_IN = const(0x91)
 _IL0373_PARTIAL_OUT = const(0x92)
 
+_IL0373_LOW_POWER_DETECT = const(0x51)
+
 class EInkOverride(Adafruit_IL0373):
     def __init__(self, width, height, spi, cs_pin, dc_pin,
                  sramcs_pin, rst_pin, busy_pin):
@@ -659,6 +697,10 @@ class EInkOverride(Adafruit_IL0373):
             data.append(0x01)         # Gates scan both inside and outside of the partial window. (default) 
             self.command(_IL0373_PARTIAL_IN)
             self.command(_IL0373_PARTIAL_WINDOW, bytearray(data))
+
+    def check_low_battery_warning(self):
+        low_batt = self.command(_IL0373_LOW_POWER_DETECT)
+        return bool(low_batt)
 
     def update(self):
         """
