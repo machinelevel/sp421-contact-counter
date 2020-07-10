@@ -29,10 +29,15 @@ import time
 import board
 import gc
 
+def addrs_to_hex(addrs):
+    return [''.join('{:02x}:'.format(x) for x in addr)[:-1] for addr in addrs]
+
 def main():
     """
     Initialize the modules, and then loop forever.
     """
+    print('free memory at startup:',gc.mem_free())
+
     contact_counter = ContactCounts()
     bt_module = BluetoothModule()
     neo_module = NeopixelModule()
@@ -40,71 +45,199 @@ def main():
     buttons = ButtonsModule()
 
     while True:
-        contact_counter.periodic_update(buttons, neo_module)
+        contact_counter.periodic_update(buttons, neo_module, eink_module)
         bt_module.periodic_update(contact_counter, buttons)
         neo_module.periodic_update(contact_counter, buttons)
         eink_module.periodic_update(contact_counter, buttons)
+        contact_counter.debug_print(buttons)
         gc.collect()
         time.sleep(1.0)
 
 ##################################################################
+## Settings: common adjustables for this program
+
+# the rssi is the signal strength. Play with this until
+# you like the distance things are triggering
+setting_bt_rssi = -80 # -80 is good, -20 is very close, -120 is very far away
+setting_bt_timeout = 0.25 # scan for this many seconds each time
+setting_end_encounter_time = 5 * 60 # End an encounter after this many seconds of not seeing the device
+
+
+##################################################################
 ## ContactCounts is the class which tracks the main counting data
-import storage
+#import storage
+
+class Encounter:
+    '''
+    An encounter is a period of contact with someone else's device 
+    '''
+    def __init__(self, is_new_device):
+        self.first_seen = time.monotonic() # When did this contact start
+        self.last_seen = time.monotonic()  # When did we last see this device
+        self.contact_duration = 0.0        # Integration over time
+        self.is_new_device = is_new_device # First contact for this device
+
+class Bloom:
+    '''
+    The bloom is a structure which tracks whether or not we've seen an address before
+    '''
+    def __init__(self, filename):
+        self.filename = filename
+        self.do_verify = True
+        self.bits = bytearray(24 * 1024)
+        self.clear()
+        self.load()
+
+    def load(self):
+        # try to load the data
+        try:
+            with open(self.filename,'rb') as f:
+                rsize = 256
+                pos = 0
+                while pos < len(self.bits):
+                    data = f.read(rsize)
+                    self.bits[pos:pos+rsize] = data
+                    pos += rsize
+            print('Loaded bloom file ok')
+        except Exception as ex:
+            print('Unable to load bloom file, creating new',ex)
+            self.save()
+
+    def save(self, byte_list=None):
+        if byte_list is None:
+            try:
+                with open(self.filename,'wb') as f:
+                    f.write(self.bits)
+                print('Saved complete bloom file')
+            except Exception as ex:
+                print('Unable to save full bloom file',ex)
+        else:
+            try:
+                with open(self.filename,'rb+') as f:
+                    for pos in byte_list:
+                        f.seek(pos)
+                        f.write(self.bits[pos:pos+1])
+                print('Saved bloom bytes',byte_list)
+            except Exception as ex:
+                print('Unable to save partial bloom file',ex)
+        self.verify()
+
+    def verify(self):
+        if self.do_verify:
+            try:
+                test_size = 256
+                test_offset = 0
+                with open(self.filename,'rb') as f:
+                    while test_offset < len(self.bits):
+                        chk = f.read(test_size)
+                        assert chk == self.bits[test_offset:test_offset+test_size],'verify mismatch'
+                        test_offset += test_size
+                print('Verified bloom file ok')
+            except Exception as ex:
+                print('Unable to verify bloom file',ex)
+
+    def clear(self):
+        for i in range(len(self.bits)):
+            self.bits[i] = 0
+
+    def add(self, addr):
+        update_bytes = []
+        is_new = False
+        for field in range(3):
+            bit_index = (addr[field * 2] << 8) | addr[field * 2 + 1]
+            pos = (bit_index >> 3) + field * 8192
+            mask = 1 << (bit_index & 7)
+            if (self.bits[pos] & mask) == 0:
+                self.bits[pos] |= mask
+                update_bytes.append(pos)
+                is_new = True
+        if is_new:
+            self.save(update_bytes)
+        return is_new
+
 
 class ContactCounts:
     def __init__(self):
-        self.start_time = time.time()
-        self.scan_serial_number = 0
-        self.sample_seconds = 0
-        self.total_unique_contacts = set()
-        self.current_contacts = set()
-        self.prev_current_contacts = set()
-        self.prev_num_total_unique_contacts = 0
-        self.prior_unique_count = 0
-        self.persistent_data = {'unique_counts':0,'sample_minutes':0}
-        self.tried_remounting_storage = False
-        self.reset_counts_timer = 0
+        self.startup_time = time.monotonic()
+        self.current_encounters = {}
+        self.persistent_data = {'unique_counts':0,'sample_seconds':0}
         self.count_file_name = '/counter_data.txt'
+        self.need_save = False
+        self.is_low_power = False
+        self.bloom = Bloom('/bloom_data.txt')
+        self.reset_counts_to_zero()
         self.load_persistent_counter_data_at_startup()
+        self.reset_button_hold_timer = 0
 
-    def periodic_update(self, buttons, neo_module=None):
+    def periodic_update(self, buttons, neo_module=None, eink_module=None):
+        if self.need_save:
+            self.save_persistent_data()
+            self.need_save = False
+
+        # enggage power saver
+        if buttons.switch() != self.is_low_power:
+            self.set_low_power(buttons.switch(), neo_module, eink_module)
+
+        # hold both buttons down to reset counts
         if buttons.left() and buttons.right():
-            self.reset_counts_timer += 1
-            if self.reset_counts_timer > 3:
+            self.reset_button_hold_timer += 1
+            if self.reset_button_hold_timer > 3:
                 if neo_module:
                     neo_module.set_all((0,64,255))
-                    time.sleep(0.5)
+                    time.sleep(0.25)
+                    neo_module.set_all((0,0,0))
                 self.reset_counts_to_zero()
-                self.reset_counts_timer = 0
+                self.save_persistent_data()
+                self.bloom.clear()
+                self.bloom.save()
+                self.reset_button_hold_timer = 0
         else:
-            self.reset_counts_timer = 0
+            self.reset_button_hold_timer = 0
 
-        self.debug_print(buttons)
-
-    def load_persistent_counter_data(self):
-        self.prior_unique_count = 0
+    def set_low_power(self, low_power, neo_module=None, eink_module=None):
+        self.is_low_power = low_power
+        if self.is_low_power:
+            print('(switch to low power mode)')
+        else:
+            print('(switch to high power mode)')
+        if neo_module:
+            neo_module.set_low_power(low_power)
+        if eink_module:
+            eink_module.set_low_power(low_power)
 
     def reset_counts_to_zero(self):
-        self.total_unique_contacts.clear()
-        self.prior_unique_count = 0
-        self.sample_seconds = 0
-        self.update_persistent_data()
+        self.current_encounters.clear()
+        self.sample_last_time = self.sample_start_time = time.monotonic()
+        self.scan_serial_number = 0
+        self.persistent_data['unique_counts'] = 0
+        self.persistent_data['sample_seconds'] = 0
+
+    def check_if_new(self, addr):
+        is_new = self.bloom.add(addr)
+        if is_new:
+            self.persistent_data['unique_counts'] += 1
+            self.need_save = True
+        return is_new
+
+    def get_total_unique(self):
+        return self.persistent_data['unique_counts']
 
     def update_contacts(self, new_contacts):
-        self.scan_serial_number += 1
-        self.prev_num_total_unique_contacts = len(self.total_unique_contacts)
-        self.prev_current_contacts = self.current_contacts
-        self.current_contacts = set(new_contacts)
-        self.total_unique_contacts.update(self.current_contacts)
-        self.update_persistent_data()
+        this_time = time.monotonic()
+        self.persistent_data['sample_seconds'] += this_time - self.sample_last_time
+        for addr in new_contacts:
+            contact = self.current_encounters.get(addr, None)
+            if contact is not None:
+                contact.last_seen = this_time
+                contact.contact_duration += this_time - self.sample_last_time
+            else:
+                self.current_encounters[addr] = Encounter(self.check_if_new(addr))
+        self.sample_last_time = this_time
 
-    def update_persistent_data(self):
-        # TODO: optimize this for the fact that most of the time it won't change
-        pd = {'unique_counts':len(self.total_unique_contacts) + self.prior_unique_count,
-              'sample_minutes':self.sample_seconds // 60}
-        if pd != self.persistent_data:
-            self.persistent_data = pd
-            self.save_persistent_data()
+        # Delete any old contacts
+        for addr in list(self.current_encounters.keys()):
+            if this_time > self.current_encounters[addr].last_seen + setting_end_encounter_time:
+                del self.current_encounters[addr]
 
     def load_persistent_counter_data_at_startup(self):
         try:
@@ -112,18 +245,16 @@ class ContactCounts:
                 # eval is unsafe, but here it's ok
                 self.persistent_data.update(eval(f.read()))
                 print('loaded data:',self.count_file_name,self.persistent_data)
-            self.prior_unique_count = self.persistent_data['unique_counts']
-            self.sample_seconds = 60 * self.persistent_data['sample_minutes']
-        except:
-            print('no data to load')
+        except Exception as ex:
+            print('no data to load',ex)
 
     def save_persistent_data(self):
         try:
             with open(self.count_file_name,'w') as f:
                 f.write(str(self.persistent_data))
             print('saved data:',self.count_file_name,self.persistent_data)
-        except:
-            print('failed to save data')
+        except Exception as ex:
+            print('failed to save data',ex)
 
     def timestr(self, t):
         t = int(t)
@@ -134,17 +265,18 @@ class ContactCounts:
         return '{}d {}h {}m {}s'.format(days, hrs, mins, secs)
 
     def debug_print(self, buttons):
-        self.current_debug_out = 'scan {}: {}/{}+{} contacts {} free-mem:{}'.format(self.scan_serial_number,
-                len(self.current_contacts), len(self.total_unique_contacts),
-                self.prior_unique_count, self.timestr(time.time() - self.start_time),
+        self.current_debug_out = 'scan {}: {}/{} contacts t={} free-mem:{}'.format(self.scan_serial_number,
+                len(self.current_encounters), self.persistent_data['unique_counts'],
+                self.timestr(self.persistent_data['sample_seconds']),
                 gc.mem_free())
-        print(self.current_debug_out)
-        if buttons.left():
-            print('Left button is down')
-        if buttons.right():
-            print('Right button is down')
-        if buttons.switch():
-            print('Switch is to the left')
+        if not self.is_low_power:
+            print(self.current_debug_out)
+            if buttons.left():
+                print('Left button is down')
+            if buttons.right():
+                print('Right button is down')
+            # if buttons.switch():
+            #     print('Switch is to the left')
 ##
 ##################################################################
 
@@ -184,10 +316,6 @@ from adafruit_bluefruit_connect.packet import Packet
 class BluetoothModule:
     def __init__(self):
         self.radio = adafruit_ble.BLERadio()
-        # the rssi is the signal strength. Play with this until
-        # you like the distance things are triggering
-        self.rssi = -80   # -80 is good, -20 is very close, -120 is very far away
-        self.scan_timeout = 0.25
 
         # set up Bluefruit Connect
         self.uart_server = UARTService()
@@ -196,9 +324,9 @@ class BluetoothModule:
         self.radio.start_advertising(self.advertisement)
 
     def periodic_update(self, cc, buttons):
-        scan_result = self.radio.start_scan(timeout=self.scan_timeout,
-                                            minimum_rssi=self.rssi)
-        contacts = [s.address for s in scan_result]
+        scan_result = self.radio.start_scan(timeout=setting_bt_timeout,
+                                            minimum_rssi=setting_bt_rssi)
+        contacts = [s.address.address_bytes for s in scan_result]
         cc.update_contacts(contacts)
 
         # update Bluefruit Connect
@@ -215,10 +343,9 @@ class BluetoothModule:
                 print("RX:", text)
             # OUTGOING (TX) periodically send text
             text = cc.current_debug_out
-            #text = '\n{},{}\n'.format(len(cc.current_contacts), cc.prior_unique_count + len(cc.total_unique_contacts))
+            #text = '\n{},{}\n'.format(val1, val2)
             #print("TX:", text.strip())
             self.uart_server.write(text.encode())
-
 
         elif self.was_connected:
             self.was_connected = False
@@ -242,20 +369,30 @@ class NeopixelModule:
         self.pixels = neopixel.NeoPixel(board.NEOPIXEL, 10,
                                         brightness=0.2, auto_write=False)
         self.pixels_need_update = True
+        self.current_displayed_count = -1
 
     def periodic_update(self, cc, buttons):
-        if len(cc.current_contacts) != len(cc.prev_current_contacts):
+        if cc.is_low_power:
+            return
+
+        if len(cc.current_encounters) != self.current_displayed_count:
             self.pixels_need_update = True
 
         if self.pixels_need_update:
-            num_contacts = len(cc.current_contacts)
+            self.current_displayed_count = len(cc.current_encounters)
             for i in range(10):
-                if i < num_contacts:
+                if i < self.current_displayed_count:
                     self.pixels[i] = self.colorwheel255(100 - i * 10)
                 else:
                     self.pixels[i] = (0,0,0)
             self.pixels.show()
             self.pixels_need_update = False
+
+    def set_low_power(self, low_power):
+        if low_power:
+            self.set_all((0,0,0))
+        else:
+            self.pixels_need_update = True
 
     def set_all(self, color):
         for i in range(10):
@@ -348,6 +485,7 @@ class EInkModule:
         self.min_update_time = 15.0
         self.last_update_time = None
         self.displayed_unique_contacts = -1
+        self.displaying_low_batt_warning = False
         self.spi = busio.SPI(board.SCL, MOSI=board.SDA)
         self.cs_pin     = digitalio.DigitalInOut(board.RX)
         self.dc_pin     = digitalio.DigitalInOut(board.TX)
@@ -360,17 +498,55 @@ class EInkModule:
                                     rst_pin=self.rst_pin, busy_pin=self.busy_pin)
 
     def periodic_update(self, cc, buttons):
-        num_unique = len(cc.total_unique_contacts) + cc.prior_unique_count
+        num_unique = cc.get_total_unique()
         if num_unique != self.displayed_unique_contacts:
             self.eink_needs_update = True;
         update_time_ok = self.last_update_time is None or \
-                         time.time() - self.last_update_time > self.min_update_time
+                         time.monotonic() - self.last_update_time > self.min_update_time
+
+        self.check_low_battery_warning(cc)
 
         if self.eink_needs_update and update_time_ok:
             self.displayed_unique_contacts = num_unique
             self.draw_everything(cc)
             self.eink_needs_update = False
-            self.last_update_time = time.time()
+            self.last_update_time = time.monotonic()
+
+    def check_low_battery_warning(self, cc):
+        low_batt = self.display.check_low_battery_warning()
+        if low_batt:
+            print('LOW BATTERY WARNING:')
+        if self.displaying_low_batt_warning != low_batt:
+            self.displaying_low_batt_warning = low_batt
+            message = 'LOW BATTERY' if low_batt else '           '
+            self.draw_tiny_text((24, 24, message))
+            if low_batt:
+                time.sleep(15)
+
+
+    def set_low_power(self, low_power):
+        if low_power:
+            self.min_update_time = 60 * 5
+            self.display.busy_wait()
+            time.sleep(0.2)
+            self.display.power_down()
+        else:
+            self.min_update_time = 15.0
+            self.eink_needs_update = True
+        # Show the icon
+        message = 'BATT SAVER MODE' if low_power else '               '
+        self.draw_tiny_text((24, 36, message))
+        time.sleep(5)
+
+    def draw_tiny_text(self, ttxt):
+        x,y,message = ttxt
+        w = len(message) * 6
+        h = 8
+        d = self.display
+        d.fill_rect(x, y, w, h, Adafruit_EPD.WHITE)
+        d.text(message, x, y, Adafruit_EPD.BLACK)
+        d.set_window((x,y,w,h))
+        d.display()
 
     def draw_everything(self, cc):
         # draw stuff here
@@ -397,6 +573,7 @@ class EInkModule:
         # d.text(out_text, x, y, Adafruit_EPD.BLACK)
         # self.add_dirty_rect([x, y, w, h])
 
+        print('draw big number')
         self.draw_big_number(self.displayed_unique_contacts, 76, 76, font_motor, do_clear=True)
         self.draw_big_number(self.displayed_unique_contacts, 76, 76, font_motor, do_clear=False)
 
@@ -404,6 +581,11 @@ class EInkModule:
             d.set_window(self.dirty_rect)
             d.display()
             self.dirty_rect = None
+            if cc.is_low_power:
+                d.busy_wait()
+                time.sleep(0.2)
+                d.power_down()
+        print('draw done')
 
     def add_dirty_rect(self, r):
         if self.dirty_rect is None:
@@ -485,6 +667,8 @@ _IL0373_PARTIAL_WINDOW = const(0x90)
 _IL0373_PARTIAL_IN = const(0x91)
 _IL0373_PARTIAL_OUT = const(0x92)
 
+_IL0373_LOW_POWER_DETECT = const(0x51)
+
 class EInkOverride(Adafruit_IL0373):
     def __init__(self, width, height, spi, cs_pin, dc_pin,
                  sramcs_pin, rst_pin, busy_pin):
@@ -514,12 +698,17 @@ class EInkOverride(Adafruit_IL0373):
             self.command(_IL0373_PARTIAL_IN)
             self.command(_IL0373_PARTIAL_WINDOW, bytearray(data))
 
+    def check_low_battery_warning(self):
+        low_batt = self.command(_IL0373_LOW_POWER_DETECT)
+        return bool(low_batt)
+
     def update(self):
         """
         COPY and OVERRIDE the Adafruit_IL0373 code, for the following reasons:
         1. Avoid waiting 15 seconds, when we could be scanning for contacts.
         """
         if self.window_rect is not None:
+            print('update()...')
             self.command(_IL0373_DISPLAY_REFRESH)
 
     def display(self):
@@ -529,6 +718,8 @@ class EInkOverride(Adafruit_IL0373):
         """
         if self.window_rect is None:
             return
+
+        print('display()...')
 
         self.power_up()
 
