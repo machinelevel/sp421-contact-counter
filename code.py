@@ -341,11 +341,22 @@ class BluetoothModule:
                 text = raw_bytes.decode().strip()
                 # print("raw bytes =", raw_bytes)
                 print("RX:", text)
+                if '143.all' in text:
+                    t = time.monotonic()
+                    order = sorted([(c.first_seen, addr) for addr,c in cc.current_encounters.items()])
+                    for i,o in enumerate(order):
+                        addr = o[1]
+                        enc = cc.current_encounters[addr]
+                        first = int((t - enc.first_seen) / 60)
+                        last = int((t - enc.last_seen) / 60)
+                        text = '{}: {} {}m {}m\n'.format(i, addrs_to_hex([addr]), first, last)
+                        self.uart_server.write(text.encode())
+
             # OUTGOING (TX) periodically send text
             text = cc.current_debug_out
             #text = '\n{},{}\n'.format(val1, val2)
             #print("TX:", text.strip())
-            self.uart_server.write(text.encode())
+            self.uart_server.write((text+'\n').encode())
 
         elif self.was_connected:
             self.was_connected = False
