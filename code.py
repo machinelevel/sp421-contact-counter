@@ -83,12 +83,12 @@ class Bloom:
     '''
     def __init__(self, filename):
         self.filename = filename
-        self.do_verify = True
+        self.do_verify = False
         self.bits = bytearray(24 * 1024)
         self.clear()
-        self.load()
+        self.load_at_startup()
 
-    def load(self):
+    def load_at_startup(self):
         # try to load the data
         try:
             with open(self.filename,'rb') as f:
@@ -155,21 +155,118 @@ class Bloom:
             self.save(update_bytes)
         return is_new
 
+class HistoryBar:
+    def __init__(self, filename):
+        self.filename = filename
+        self.num_columns = 8 * 15 # one column every 4 minutes for 8 hours
+        self.data = bytearray(self.num_columns * 2)
+        self.update_period = 60#4 * 60
+        self.draw_period = 4*60#4 * 60
+        self.start_index = 0
+        self.last_update_time = time.monotonic()
+        self.last_draw_time = time.monotonic()
+        self.load_at_startup()
+
+    def periodic_update(self, cc):
+        t = time.monotonic()
+        if t - self.last_update_time > self.update_period:
+            self.last_update_time = t
+            count_to_display = 0
+            for enc in cc.current_encounters.values():
+                if t - enc.last_seen < self.update_period:
+                    count_to_display += 1
+            next_index = self.start_index
+            self.start_index += 1
+            self.start_index %= self.num_columns
+            self.set_value(next_index, count_to_display)
+            self.save()
+            print('updated historybar',next_index,count_to_display)
+
+    def draw_update(self, eink):
+        t = time.monotonic()
+        if t - self.last_draw_time > self.draw_period:
+            print('drawing historybar...')
+            self.last_draw_time = t
+            x = (eink.width - self.num_columns) >> 1
+            y = 16
+            w = self.num_columns
+            h = 32
+            tw = 6
+            th = 8
+            basey = y + h - 1
+            d = eink.display
+            d.fill_rect(x, y, w, h, Adafruit_EPD.WHITE)
+            d.fill_rect(x-1, basey, w+2, 1, Adafruit_EPD.BLACK)
+            maxval = 0
+            for i in range(self.num_columns):
+                maxval = max(maxval, self.get_value(i))
+            if maxval > 0:
+                if maxval < 10:
+                    maxval = 10
+                scale = h / maxval
+                for i in range(self.num_columns):
+                    dx = (i + self.num_columns - self.start_index) % self.num_columns
+                    dsize = int(scale * self.get_value(i))
+                    if dsize:
+                        d.fill_rect(x+dx, basey - dsize, 1, dsize, Adafruit_EPD.BLACK)
+            maxtext = '{}'.format(int(maxval))
+            d.text(maxtext, x+w-tw*len(maxtext), y, Adafruit_EPD.BLACK)
+            d.text('2 hours', x, y + h + 1, Adafruit_EPD.BLACK)
+            d.set_window((x-1,y,w+2,h + th + 1))
+            d.display()
+
+    def set_value(self, index, value):
+        i = index << 1
+        self.data[i] = value & 0xff
+        self.data[i + 1] = (value >> 8) & 0xff
+
+    def get_value(self, index):
+        i = index << 1
+        return self.data[i] | (self.data[i + 1] << 8)
+
+    def load_at_startup(self):
+        # try to load the data
+        try:
+            with open(self.filename,'rb') as f:
+                in_bytes = f.read()
+                if len(in_bytes) == len(self.data):
+                    for i in range(len(self.data)):
+                        self.data[i] = in_bytes[i]
+            print('Loaded historybar file ok')
+        except Exception as ex:
+            print('Unable to load historybar file',ex)
+
+    def save(self, index_list=None):
+        try:
+            si = self.start_index << 1
+            with open(self.filename,'wb') as f:
+                f.write(self.data[si:])
+                if si > 0:
+                    f.write(self.data[:si])
+            print('Saved historybar file')
+        except Exception as ex:
+            print('Unable to save full historybar file',ex)
 
 class ContactCounts:
     def __init__(self):
         self.startup_time = time.monotonic()
         self.current_encounters = {}
         self.persistent_data = {'unique_counts':0,'sample_seconds':0}
-        self.count_file_name = '/counter_data.txt'
+        self.count_file_name = '/data_counter.txt'
         self.need_save = False
         self.is_low_power = False
-        self.bloom = Bloom('/bloom_data.txt')
+        self.bloom = Bloom('/data_bloom.bin')
         self.reset_counts_to_zero()
         self.load_persistent_counter_data_at_startup()
         self.reset_button_hold_timer = 0
+        self.history_bar = HistoryBar('/data_historybar.bin')
+        # self.histogram = Histogram('/histogram.bin')
 
     def periodic_update(self, buttons, neo_module=None, eink_module=None):
+        if self.history_bar is not None:
+            self.history_bar.periodic_update(self)
+            self.history_bar.draw_update(eink_module)
+
         if self.need_save:
             self.save_persistent_data()
             self.need_save = False
@@ -386,11 +483,18 @@ class NeopixelModule:
         if cc.is_low_power:
             return
 
-        if len(cc.current_encounters) != self.current_displayed_count:
+        # One light for each encounter still active as of a minute ago
+        t = time.monotonic()
+        count_to_display = 0
+        for enc in cc.current_encounters.values():
+            if t - enc.last_seen < 60:
+                count_to_display += 1
+
+        if count_to_display != self.current_displayed_count:
             self.pixels_need_update = True
 
         if self.pixels_need_update:
-            self.current_displayed_count = len(cc.current_encounters)
+            self.current_displayed_count = count_to_display
             for i in range(10):
                 if i < self.current_displayed_count:
                     self.pixels[i] = self.colorwheel255(100 - i * 10)
