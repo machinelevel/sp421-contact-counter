@@ -28,15 +28,23 @@ License:
 import time
 import board
 import gc
+import os
 
+def addr_to_hex(addr):
+    return ''.join('{:02x}:'.format(x) for x in reversed(addr))[:-1]
 def addrs_to_hex(addrs):
-    return [''.join('{:02x}:'.format(x) for x in addr)[:-1] for addr in addrs]
+    return [addr_to_hex(addr) for addr in addrs]
+def btprint(text):
+    print(text)
+    if radio is not None and radio.connected:
+         uart_server.write((text+'\n').encode())
+radio = None
 
 def main():
     """
     Initialize the modules, and then loop forever.
     """
-    print('free memory at startup:',gc.mem_free())
+    btprint('free memory at startup: {}k'.format(int(gc.mem_free() // 1024)))
 
     contact_counter = ContactCounts()
     bt_module = BluetoothModule()
@@ -98,9 +106,9 @@ class Bloom:
                     data = f.read(rsize)
                     self.bits[pos:pos+rsize] = data
                     pos += rsize
-            print('Loaded bloom file ok')
+            btprint('Loaded bloom file ok')
         except Exception as ex:
-            print('Unable to load bloom file, creating new',ex)
+            btprint('Unable to load bloom file, creating new: {}'.format(ex))
             self.save()
 
     def save(self, byte_list=None):
@@ -108,18 +116,18 @@ class Bloom:
             try:
                 with open(self.filename,'wb') as f:
                     f.write(self.bits)
-                print('Saved complete bloom file')
+                btprint('Saved complete bloom file')
             except Exception as ex:
-                print('Unable to save full bloom file',ex)
+                btprint('Unable to save full bloom file: {}'.format(ex))
         else:
             try:
                 with open(self.filename,'rb+') as f:
                     for pos in byte_list:
                         f.seek(pos)
                         f.write(self.bits[pos:pos+1])
-                print('Saved bloom bytes',byte_list)
+                btprint('Saved bloom bytes: {}'.format(byte_list))
             except Exception as ex:
-                print('Unable to save partial bloom file',ex)
+                btprint('Unable to save partial bloom file: {}'.format(ex))
         self.verify()
 
     def verify(self):
@@ -132,9 +140,9 @@ class Bloom:
                         chk = f.read(test_size)
                         assert chk == self.bits[test_offset:test_offset+test_size],'verify mismatch'
                         test_offset += test_size
-                print('Verified bloom file ok')
+                btprint('Verified bloom file ok')
             except Exception as ex:
-                print('Unable to verify bloom file',ex)
+                btprint('Unable to verify bloom file: {}'.format(ex))
 
     def clear(self):
         for i in range(len(self.bits)):
@@ -180,12 +188,12 @@ class HistoryBar:
             self.start_index %= self.num_columns
             self.set_value(next_index, count_to_display)
             self.save()
-            print('updated historybar',next_index,count_to_display)
+            btprint('updated historybar {} {}'.format(next_index,count_to_display))
 
     def draw_update(self, eink):
         t = time.monotonic()
         if t - self.last_draw_time > self.draw_period:
-            print('drawing historybar...')
+            btprint('drawing historybar...')
             self.last_draw_time = t
             x = (eink.width - self.num_columns) >> 1
             y = 16
@@ -204,6 +212,8 @@ class HistoryBar:
                 if maxval < 10:
                     maxval = 10
                 scale = h / maxval
+                if scale < 1.0:
+                    scale = 1.0
                 for i in range(self.num_columns):
                     dx = (i + self.num_columns - self.start_index) % self.num_columns
                     dsize = int(scale * self.get_value(i))
@@ -232,9 +242,9 @@ class HistoryBar:
                 if len(in_bytes) == len(self.data):
                     for i in range(len(self.data)):
                         self.data[i] = in_bytes[i]
-            print('Loaded historybar file ok')
+            btprint('Loaded historybar file ok')
         except Exception as ex:
-            print('Unable to load historybar file',ex)
+            btprint('Unable to load historybar file: {}'.format(ex))
 
     def save(self, index_list=None):
         try:
@@ -243,9 +253,64 @@ class HistoryBar:
                 f.write(self.data[si:])
                 if si > 0:
                     f.write(self.data[:si])
-            print('Saved historybar file')
+            btprint('Saved historybar file')
         except Exception as ex:
-            print('Unable to save full historybar file',ex)
+            btprint('Unable to save full historybar file: {}'.format(ex))
+
+class DoubleLager:
+    def __init__(self):
+        self.log_file_max_size = 1024 * 100
+        self.filenames = ['/data_log0.txt', '/data_log1.txt']
+        self.log_index = 0
+        try:
+            size0 = os.stat(self.filenames[0]).st_size
+            if size0 >- self.log_file_max_size:
+                self.log_index = 1
+        except:
+            pass
+
+    def log_add_contact(self, big_number, addr, contact):
+        line = 'add,{},{},{},{}'.format(int(time.monotonic()), big_number,
+                                          addr_to_hex(addr), int(contact.is_new_device))
+        self.log_str(line)
+        print('log: ' + line)
+
+    def log_del_contact(self, big_number, addr, contact):
+        line = 'del,{},{},{},{},{},{},{}'.format(int(time.monotonic()), big_number, 
+                                                   addr_to_hex(addr), int(contact.is_new_device), 
+                                                   int(contact.first_seen), int(contact.last_seen),
+                                                   int(contact.contact_duration))
+        self.log_str(line)
+        print('log: ' + line)
+
+    def log_startup(self, big_number):
+        line = 'startup,{},{}'.format(int(time.monotonic()), big_number)
+        self.log_str(line)
+        print('log: ' + line)
+
+    def log_str(self, line):
+        '''write a string to the log'''
+        try:
+            with open(self.filenames[self.log_index],'a') as f:
+                f.write(line+'\n')
+                if f.tell() > self.log_file_max_size:
+                    self.log_index = (self.log_index + 1) & 1
+                    with open(self.filenames[self.log_index],'w') as f2:
+                        pass
+        except Exception as ex:
+            btprint('failed to write log: {}'.format(ex))
+
+    def log_dump(self, bt=None):
+        '''Read the logs out to stdout and bt-connect'''
+        for i in range(2):
+            index = (self.log_index + i + 1) & 1
+            try:
+                with open(self.filenames[index],'r') as f:
+                    btprint(self.filenames[index])
+                    for line in f:
+                        btprint(line.strip())
+            except Exception as ex:
+                btprint('failed to read log: {}'.format(ex))
 
 class ContactCounts:
     def __init__(self):
@@ -260,6 +325,8 @@ class ContactCounts:
         self.load_persistent_counter_data_at_startup()
         self.reset_button_hold_timer = 0
         self.history_bar = HistoryBar('/data_historybar.bin')
+        self.lager = DoubleLager()
+        self.lager.log_startup(self.get_total_unique())
         # self.histogram = Histogram('/histogram.bin')
 
     def periodic_update(self, buttons, neo_module=None, eink_module=None):
@@ -322,18 +389,25 @@ class ContactCounts:
     def update_contacts(self, new_contacts):
         this_time = time.monotonic()
         self.persistent_data['sample_seconds'] += this_time - self.sample_last_time
-        for addr in new_contacts:
+        for nc in new_contacts:
+            addr = nc.address.address_bytes
             contact = self.current_encounters.get(addr, None)
             if contact is not None:
                 contact.last_seen = this_time
                 contact.contact_duration += this_time - self.sample_last_time
             else:
                 self.current_encounters[addr] = Encounter(self.check_if_new(addr))
+                self.lager.log_add_contact(self.get_total_unique(), addr, self.current_encounters[addr])
+                if 0:
+                    print('>>>>>>>>add')
+                    print(nc)
+                    print(nc.__dict__)
         self.sample_last_time = this_time
 
         # Delete any old contacts
         for addr in list(self.current_encounters.keys()):
             if this_time > self.current_encounters[addr].last_seen + setting_end_encounter_time:
+                self.lager.log_del_contact(self.get_total_unique(), addr, self.current_encounters[addr])
                 del self.current_encounters[addr]
 
     def load_persistent_counter_data_at_startup(self):
@@ -412,19 +486,24 @@ from adafruit_bluefruit_connect.packet import Packet
 
 class BluetoothModule:
     def __init__(self):
-        self.radio = adafruit_ble.BLERadio()
+        global radio
+        radio = self.radio = adafruit_ble.BLERadio()
 
         # set up Bluefruit Connect
         self.uart_server = UARTService()
         self.advertisement = ProvideServicesAdvertisement(self.uart_server)
         self.was_connected = False
         self.radio.start_advertising(self.advertisement)
+        self.small_led = digitalio.DigitalInOut(board.D13)
+        self.small_led.direction = digitalio.Direction.OUTPUT
 
     def periodic_update(self, cc, buttons):
+        self.small_led.value = True
         scan_result = self.radio.start_scan(timeout=setting_bt_timeout,
                                             minimum_rssi=setting_bt_rssi)
-        contacts = [s.address.address_bytes for s in scan_result]
-        cc.update_contacts(contacts)
+        #contacts = [s.address.address_bytes for s in scan_result]
+        cc.update_contacts(scan_result)
+        self.small_led.value = False
 
         # update Bluefruit Connect
         if self.radio.connected:
@@ -437,7 +516,7 @@ class BluetoothModule:
                 raw_bytes = self.uart_server.read(self.uart_server.in_waiting)
                 text = raw_bytes.decode().strip()
                 # print("raw bytes =", raw_bytes)
-                print("RX:", text)
+                btprint("RX: {}".format(text))
                 if '143.all' in text:
                     t = time.monotonic()
                     order = sorted([(c.first_seen, addr) for addr,c in cc.current_encounters.items()])
@@ -448,6 +527,8 @@ class BluetoothModule:
                         last = int((t - enc.last_seen) / 60)
                         text = '{}: {} {}m {}m\n'.format(i, addrs_to_hex([addr]), first, last)
                         self.uart_server.write(text.encode())
+                elif '143.log' in text:
+                    cc.lager.log_dump(self)
 
             # OUTGOING (TX) periodically send text
             text = cc.current_debug_out
@@ -630,7 +711,7 @@ class EInkModule:
     def check_low_battery_warning(self, cc):
         low_batt = self.display.check_low_battery_warning()
         if low_batt:
-            print('LOW BATTERY WARNING:')
+            btprint('LOW BATTERY WARNING:')
         if self.displaying_low_batt_warning != low_batt:
             self.displaying_low_batt_warning = low_batt
             message = 'LOW BATTERY' if low_batt else '           '
