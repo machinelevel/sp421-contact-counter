@@ -25,10 +25,14 @@ License:
     If you use it, drop us a note and say hi!
     There is no warranty at all, use at your own risk.
 """
-import time
-import board
 import gc
+print('////100///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
+import time
+print('////101///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
+import board
+print('////102///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 import os
+print('////103///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 def addr_to_hex(addr):
     return ''.join('{:02x}:'.format(x) for x in reversed(addr))[:-1]
@@ -39,6 +43,7 @@ def btprint(text):
     if radio is not None and radio.connected:
          uart_server.write((text+'\n').encode())
 radio = None
+print('////1010///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 def main():
     """
@@ -60,6 +65,7 @@ def main():
         contact_counter.debug_print(buttons)
         gc.collect()
         time.sleep(1.0)
+print('////1020///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 ##################################################################
 ## Settings: common adjustables for this program
@@ -79,11 +85,13 @@ class Encounter:
     '''
     An encounter is a period of contact with someone else's device 
     '''
-    def __init__(self, is_new_device):
-        self.first_seen = time.monotonic() # When did this contact start
-        self.last_seen = time.monotonic()  # When did we last see this device
-        self.contact_duration = 0.0        # Integration over time
-        self.is_new_device = is_new_device # First contact for this device
+    def __init__(self, is_new_device, hopper_thumbprint):
+        self.first_seen = time.monotonic()  # When did this contact start
+        self.last_seen = time.monotonic()   # When did we last see this device
+        self.contact_duration = 0.0         # Integration over time
+        self.is_new_device = is_new_device  # First contact for this device
+        self.thumbprint = hopper_thumbprint # to help identify hopper-buddies
+print('////1030///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class Bloom:
     '''
@@ -162,6 +170,7 @@ class Bloom:
         if is_new:
             self.save(update_bytes)
         return is_new
+print('////1040///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class HistoryBar:
     def __init__(self, filename):
@@ -256,6 +265,7 @@ class HistoryBar:
             btprint('Saved historybar file')
         except Exception as ex:
             btprint('Unable to save full historybar file: {}'.format(ex))
+print('////1050///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class DoubleLager:
     def __init__(self):
@@ -264,14 +274,21 @@ class DoubleLager:
         self.log_index = 0
         try:
             size0 = os.stat(self.filenames[0]).st_size
-            if size0 >- self.log_file_max_size:
+            if size0 >= self.log_file_max_size:
                 self.log_index = 1
         except:
             pass
 
-    def log_add_contact(self, big_number, addr, contact):
-        line = 'add,{},{},{},{}'.format(int(time.monotonic()), big_number,
-                                          addr_to_hex(addr), int(contact.is_new_device))
+    def log_add_contact(self, big_number, addr, contact, hop_type):
+        line = 'add,{},{},{},{},{}'.format(int(time.monotonic()), big_number,
+                                          addr_to_hex(addr), int(contact.is_new_device), hop_type)
+        self.log_str(line)
+        print('log: ' + line)
+
+    def log_hop_contact(self, big_number, old_addr, new_addr, contact):
+        line = 'hop,{},{},{},{}'.format(int(time.monotonic()), big_number,
+                                          addr_to_hex(old_addr) + '->' + addr_to_hex(new_addr),
+                                          int(contact.is_new_device))
         self.log_str(line)
         print('log: ' + line)
 
@@ -292,11 +309,12 @@ class DoubleLager:
         '''write a string to the log'''
         try:
             with open(self.filenames[self.log_index],'a') as f:
-                f.write(line+'\n')
-                if f.tell() > self.log_file_max_size:
+                if f.tell() <= self.log_file_max_size:
+                    f.write(line+'\n')
+                else:
                     self.log_index = (self.log_index + 1) & 1
                     with open(self.filenames[self.log_index],'w') as f2:
-                        pass
+                        f2.write(line+'\n')
         except Exception as ex:
             btprint('failed to write log: {}'.format(ex))
 
@@ -311,6 +329,7 @@ class DoubleLager:
                         btprint(line.strip())
             except Exception as ex:
                 btprint('failed to read log: {}'.format(ex))
+print('////1060///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class ContactCounts:
     def __init__(self):
@@ -330,6 +349,7 @@ class ContactCounts:
         # self.histogram = Histogram('/histogram.bin')
 
     def periodic_update(self, buttons, neo_module=None, eink_module=None):
+        self.scan_serial_number += 1
         if self.history_bar is not None:
             self.history_bar.periodic_update(self)
             self.history_bar.draw_update(eink_module)
@@ -352,8 +372,9 @@ class ContactCounts:
                     neo_module.set_all((0,0,0))
                 self.reset_counts_to_zero()
                 self.save_persistent_data()
-                self.bloom.clear()
-                self.bloom.save()
+                if self.bloom:
+                    self.bloom.clear()
+                    self.bloom.save()
                 self.reset_button_hold_timer = 0
         else:
             self.reset_button_hold_timer = 0
@@ -377,7 +398,9 @@ class ContactCounts:
         self.persistent_data['sample_seconds'] = 0
 
     def check_if_new(self, addr):
-        is_new = self.bloom.add(addr)
+        is_new = True
+        if self.bloom:
+            is_new = self.bloom.add(addr)
         if is_new:
             self.persistent_data['unique_counts'] += 1
             self.need_save = True
@@ -387,21 +410,83 @@ class ContactCounts:
         return self.persistent_data['unique_counts']
 
     def update_contacts(self, new_contacts):
+#         for i,nc in enumerate(new_contacts):
+#             print(i,nc)
+#             print(' ',i,nc.__dict__)
+# #            print(' raw:',i,len(nc.advertisement_bytes),nc.advertisement_bytes)
+#             atype = '?'
+#             if nc.address.type == _bleio.Address.PUBLIC:
+#                 atype = 'Public'
+#             elif nc.address.type == _bleio.Address.RANDOM_STATIC:
+#                 atype = 'Static'
+#             elif nc.address.type == _bleio.Address.RANDOM_PRIVATE_RESOLVABLE:
+#                 atype = 'Resolvable'
+#             elif nc.address.type == _bleio.Address.RANDOM_PRIVATE_NON_RESOLVABLE:
+#                 atype = 'Hopper'
+#             print(' addr_type:',nc.address.type,atype)
         this_time = time.monotonic()
         self.persistent_data['sample_seconds'] += this_time - self.sample_last_time
+        new_hoppers = []
         for nc in new_contacts:
             addr = nc.address.address_bytes
             contact = self.current_encounters.get(addr, None)
             if contact is not None:
+#                print('  ]]]] existing contact',addr)
                 contact.last_seen = this_time
                 contact.contact_duration += this_time - self.sample_last_time
             else:
-                self.current_encounters[addr] = Encounter(self.check_if_new(addr))
-                self.lager.log_add_contact(self.get_total_unique(), addr, self.current_encounters[addr])
-                if 0:
-                    print('>>>>>>>>add')
-                    print(nc)
-                    print(nc.__dict__)
+                print('  ]]]] new contact',addr)
+                is_hopper = nc.address.type == _bleio.Address.RANDOM_PRIVATE_RESOLVABLE or nc.address.type == _bleio.Address.RANDOM_PRIVATE_NON_RESOLVABLE
+                if is_hopper:
+                    print('  ]]]] added to new hoppers')
+                    new_hoppers.append(nc)
+                else:
+                    print('  ]]]] added as static')
+                    is_new = self.check_if_new(addr)
+                    self.current_encounters[addr] = Encounter(is_new, None)
+                    self.lager.log_add_contact(self.get_total_unique(), addr, self.current_encounters[addr], 'static')
+                    print(']]]] current_enc',self.current_encounters.keys())
+                # if 0:
+                #     print('>>>>>>>>add')
+                #     print(nc)
+                #     print(nc.__dict__)
+
+        if new_hoppers:
+            new_thumbprints = []
+            for nc in new_hoppers:
+                keys = sorted(list(nc.data_dict.keys()))
+                new_thumbprints.append(bytearray([nc.address.type] + keys + [len(nc.data_dict[k]) for k in keys]))
+
+            # See if any of our old hoppers have migrated
+            for addr in list(self.current_encounters.keys()):
+                enc = self.current_encounters[addr]
+                if enc.last_seen < this_time:
+                    print(']]]] checking old contact',addr)
+                    if enc.thumbprint is not None:
+                        print(' ]]]] is hopper...',enc.thumbprint)
+                        for i,nc in enumerate(new_hoppers):
+                            if nc is not None:
+                                if enc.thumbprint == new_thumbprints[i]:
+                                    print('  ]]]] matched thumbs',enc.thumbprint, new_thumbprints[i])
+                                    # Yes, migrate this.
+                                    old_addr = addr
+                                    new_addr = nc.address.address_bytes
+                                    self.lager.log_hop_contact(self.get_total_unique(), old_addr, new_addr, enc)
+                                    del self.current_encounters[old_addr]
+                                    self.current_encounters[new_addr] = enc
+                                    enc.last_seen = this_time
+                                    enc.contact_duration += this_time - self.sample_last_time
+                                    new_hoppers[i] = None
+                                    new_thumbprints[i] = None
+                                    print(']]]] current_enc',self.current_encounters.keys())
+                                    break
+            for i,nc in enumerate(new_hoppers):
+                if nc is not None:
+                    addr = nc.address.address_bytes
+                    self.current_encounters[addr] = Encounter(True, new_thumbprints[i])
+                    self.lager.log_add_contact(self.get_total_unique(), addr, self.current_encounters[addr], 'hopper')
+                    print(']]]] current_enc',self.current_encounters.keys())
+
         self.sample_last_time = this_time
 
         # Delete any old contacts
@@ -409,6 +494,7 @@ class ContactCounts:
             if this_time > self.current_encounters[addr].last_seen + setting_end_encounter_time:
                 self.lager.log_del_contact(self.get_total_unique(), addr, self.current_encounters[addr])
                 del self.current_encounters[addr]
+                print(']]]] current_enc',self.current_encounters.keys())
 
     def load_persistent_counter_data_at_startup(self):
         try:
@@ -451,6 +537,7 @@ class ContactCounts:
 ##
 ##################################################################
 
+print('////1070///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 ##################################################################
 ## Buttons section: If you're not using buttons,
@@ -477,12 +564,34 @@ class ButtonsModule:
 ##################################################################
 ## Bluetooth section: If you're not using Bluetooth,
 ##                    you can just delete this whole section
-import adafruit_ble
-from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
-from adafruit_ble.services.nordic import UARTService
+print('////1100///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
+import _bleio
+print('////1101///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
+import adafruit_ble # mem: 11k
+print('////1102///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
+from adafruit_ble.advertising.standard import ProvideServicesAdvertisement  # mem: 3k
+print('////1103///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
+from adafruit_ble.services.nordic import UARTService # mem: 2k
+print('////1104///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 from adafruit_bluefruit_connect.packet import Packet
+print('////1105///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 # Only the packet classes that are imported will be known to Packet.
 # from adafruit_bluefruit_connect.color_packet import ColorPacket
+
+# class CounterAd(adafruit_ble.Advertisement):
+#     """Custom class to keep the original bytes."""
+#     def __init__(self):
+#         pass
+
+#     @classmethod
+#     def from_entry(cls, entry):
+#         self = cls()
+#         self.data_dict = {}
+#         self.raw_bytes = entry.advertisement_bytes
+#         self.address_type = entry.address.type
+#         self.address_bytes = entry.address.address_bytes
+#         self._rssi = entry.rssi
+#         return self
 
 class BluetoothModule:
     def __init__(self):
@@ -501,7 +610,6 @@ class BluetoothModule:
         self.small_led.value = True
         scan_result = self.radio.start_scan(timeout=setting_bt_timeout,
                                             minimum_rssi=setting_bt_rssi)
-        #contacts = [s.address.address_bytes for s in scan_result]
         cc.update_contacts(scan_result)
         self.small_led.value = False
 
@@ -551,7 +659,9 @@ class BluetoothModule:
 ##################################################################
 ## Neopixel section: If you're not using Neopixels,
 ##                   you can just delete this whole section
+print('////1200///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 import neopixel
+print('////1201///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class NeopixelModule:
     def __init__(self):
@@ -616,12 +726,19 @@ class NeopixelModule:
 ##################################################################
 ## EInk section: If you're not using EInk,
 ##               you can just delete this whole section
+print('////1300///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 from adafruit_epd.il0373 import Adafruit_IL0373
+print('////1301///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 from adafruit_epd.epd import Adafruit_EPD
+print('////1302///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 from adafruit_epd import mcp_sram
+print('////1303///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 import digitalio
+print('////1304///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 import busio
+print('////1305///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 import terminalio    # needed for tiny font
+print('////1306///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 # converted at https://javl.github.io/image2cpp/
 # 'font_motor_24w_p3', 24x206px
@@ -670,6 +787,7 @@ font_motor = {'width':24,
                 0x00, 0x07, 0xff, 0xf0, 0x0f, 0xff, 0xf0, 0x0f, 0xff, 0xe0, 0x1f, 0xc0, 0x00, 0x3f, 0xc0, 0x00, \
                 0x7f, 0x80, 0x01, 0xff, 0x80, 0x0f, 0xff, 0xff, 0xff, 0xff]),
 }
+print('////1400///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class EInkModule:
     def __init__(self):
@@ -1019,6 +1137,7 @@ class EInkOverride(Adafruit_IL0373):
 ## (end of EInk section)
 ##################################################################
 
+print('////1500///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 # Start the program
 main()
