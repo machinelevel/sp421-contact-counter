@@ -42,6 +42,10 @@ def btprint(text):
     print(text)
     if radio is not None and radio.connected:
          uart_server.write((text+'\n').encode())
+
+def get_file_size(filename):
+    return os.stat(filename)[6]
+
 radio = None
 print('////1010///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
@@ -107,6 +111,8 @@ class Bloom:
     def load_at_startup(self):
         # try to load the data
         try:
+            size0 = get_file_size(self.filename)
+            assert size0 == len(self.bits), 'bad file size = {}'.format(size0)
             with open(self.filename,'rb') as f:
                 rsize = 256
                 pos = 0
@@ -273,7 +279,7 @@ class DoubleLager:
         self.filenames = ['/data_log0.txt', '/data_log1.txt']
         self.log_index = 0
         try:
-            size0 = os.stat(self.filenames[0]).st_size
+            size0 = get_file_size(self.filenames[0])
             if size0 >= self.log_file_max_size:
                 self.log_index = 1
         except:
