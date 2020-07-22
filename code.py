@@ -46,6 +46,11 @@ def btprint(text):
 def get_file_size(filename):
     return os.stat(filename)[6]
 
+def make_thumbprint(contact):
+    keys = sorted(list(contact.data_dict.keys()))
+    sizes = [len(contact.data_dict[k]) for k in keys]
+    return bytes([contact.address.type] + keys + sizes)
+
 radio = None
 print('////1010///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
@@ -341,6 +346,7 @@ class ContactCounts:
     def __init__(self):
         self.startup_time = time.monotonic()
         self.current_encounters = {}
+        self.check_for_hoppers = True
         self.persistent_data = {'unique_counts':0,'sample_seconds':0}
         self.count_file_name = '/data_counter.txt'
         self.need_save = False
@@ -407,10 +413,13 @@ class ContactCounts:
         is_new = True
         if self.bloom:
             is_new = self.bloom.add(addr)
-        if is_new:
+        return is_new
+
+    def new_encounter(self, new_bloom, thumbprint):
+        if new_bloom:
             self.persistent_data['unique_counts'] += 1
             self.need_save = True
-        return is_new
+        return Encounter(new_bloom, thumbprint)
 
     def get_total_unique(self):
         return self.persistent_data['unique_counts']
@@ -431,76 +440,60 @@ class ContactCounts:
 #                 atype = 'Hopper'
 #             print(' addr_type:',nc.address.type,atype)
         this_time = time.monotonic()
+        delta_time = this_time - self.sample_last_time
         self.persistent_data['sample_seconds'] += this_time - self.sample_last_time
-        new_hoppers = []
+
+        # update times for old contacts
+        new_addrs = set([nc.address.address_bytes for nc in new_contacts])
+#        print('new_addrs:',new_addrs)
+        old_hoppers = {}
+        for addr in list(self.current_encounters.keys()):
+            encounter = self.current_encounters[addr]
+            if addr in new_addrs:
+#                print('update addr:',addr)
+                encounter.last_seen = this_time
+                encounter.contact_duration += delta_time
+            else:
+                if this_time > encounter.last_seen + setting_end_encounter_time:
+                    self.lager.log_del_contact(self.get_total_unique(), addr, self.current_encounters[addr])
+                    del self.current_encounters[addr]
+                else:
+                    if encounter.thumbprint:
+                        old_hoppers[addr] = encounter
+
+#        print('eek',new_contacts)
+        # now for any addresses which are new, create/migrate contacts
         for nc in new_contacts:
             addr = nc.address.address_bytes
-            contact = self.current_encounters.get(addr, None)
-            if contact is not None:
-#                print('  ]]]] existing contact',addr)
-                contact.last_seen = this_time
-                contact.contact_duration += this_time - self.sample_last_time
-            else:
-                print('  ]]]] new contact',addr)
+#            print('check addr:',addr,self.current_encounters.keys())
+            if not addr in self.current_encounters:
+#                print('add addr:',addr)
                 is_hopper = nc.address.type == _bleio.Address.RANDOM_PRIVATE_RESOLVABLE or nc.address.type == _bleio.Address.RANDOM_PRIVATE_NON_RESOLVABLE
                 if is_hopper:
-                    print('  ]]]] added to new hoppers')
-                    new_hoppers.append(nc)
+                    encounter = None
+                    thumbprint = make_thumbprint(nc)
+                    for haddr,hopper in old_hoppers.items():
+                        if hopper.thumbprint == thumbprint:
+                            # migrate the hopper
+                            del old_hoppers[haddr]
+                            del self.current_encounters[haddr]
+                            encounter = hopper
+                            new_type = 'migrated hopper'
+                            break
+                    if encounter is None:
+                        new_type = 'new hopper'
+                        encounter = self.new_encounter(True, thumbprint)
                 else:
-                    print('  ]]]] added as static')
-                    is_new = self.check_if_new(addr)
-                    self.current_encounters[addr] = Encounter(is_new, None)
-                    self.lager.log_add_contact(self.get_total_unique(), addr, self.current_encounters[addr], 'static')
-                    print(']]]] current_enc',self.current_encounters.keys())
-                # if 0:
-                #     print('>>>>>>>>add')
-                #     print(nc)
-                #     print(nc.__dict__)
+                    new_bloom = self.check_if_new(addr)
+                    new_type = 'new static' if new_bloom else 'known static'
+                    encounter = self.new_encounter(new_bloom, None)
 
-        if new_hoppers:
-            new_thumbprints = []
-            for nc in new_hoppers:
-                keys = sorted(list(nc.data_dict.keys()))
-                new_thumbprints.append(bytearray([nc.address.type] + keys + [len(nc.data_dict[k]) for k in keys]))
-
-            # See if any of our old hoppers have migrated
-            for addr in list(self.current_encounters.keys()):
-                enc = self.current_encounters[addr]
-                if enc.last_seen < this_time:
-                    print(']]]] checking old contact',addr)
-                    if enc.thumbprint is not None:
-                        print(' ]]]] is hopper...',enc.thumbprint)
-                        for i,nc in enumerate(new_hoppers):
-                            if nc is not None:
-                                if enc.thumbprint == new_thumbprints[i]:
-                                    print('  ]]]] matched thumbs',enc.thumbprint, new_thumbprints[i])
-                                    # Yes, migrate this.
-                                    old_addr = addr
-                                    new_addr = nc.address.address_bytes
-                                    self.lager.log_hop_contact(self.get_total_unique(), old_addr, new_addr, enc)
-                                    del self.current_encounters[old_addr]
-                                    self.current_encounters[new_addr] = enc
-                                    enc.last_seen = this_time
-                                    enc.contact_duration += this_time - self.sample_last_time
-                                    new_hoppers[i] = None
-                                    new_thumbprints[i] = None
-                                    print(']]]] current_enc',self.current_encounters.keys())
-                                    break
-            for i,nc in enumerate(new_hoppers):
-                if nc is not None:
-                    addr = nc.address.address_bytes
-                    self.current_encounters[addr] = Encounter(True, new_thumbprints[i])
-                    self.lager.log_add_contact(self.get_total_unique(), addr, self.current_encounters[addr], 'hopper')
-                    print(']]]] current_enc',self.current_encounters.keys())
+                self.lager.log_add_contact(self.get_total_unique(), addr, encounter, new_type)
+                self.current_encounters[addr] = encounter
+                encounter.last_seen = this_time
+                encounter.contact_duration += this_time - self.sample_last_time
 
         self.sample_last_time = this_time
-
-        # Delete any old contacts
-        for addr in list(self.current_encounters.keys()):
-            if this_time > self.current_encounters[addr].last_seen + setting_end_encounter_time:
-                self.lager.log_del_contact(self.get_total_unique(), addr, self.current_encounters[addr])
-                del self.current_encounters[addr]
-                print(']]]] current_enc',self.current_encounters.keys())
 
     def load_persistent_counter_data_at_startup(self):
         try:
@@ -616,7 +609,7 @@ class BluetoothModule:
         self.small_led.value = True
         scan_result = self.radio.start_scan(timeout=setting_bt_timeout,
                                             minimum_rssi=setting_bt_rssi)
-        cc.update_contacts(scan_result)
+        cc.update_contacts(list(scan_result))
         self.small_led.value = False
 
         # update Bluefruit Connect
