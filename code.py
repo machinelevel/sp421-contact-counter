@@ -69,6 +69,7 @@ def main():
     while True:
         contact_counter.periodic_update(buttons, neo_module, eink_module)
         bt_module.periodic_update(contact_counter, buttons)
+        gc.collect()
         neo_module.periodic_update(contact_counter, buttons)
         eink_module.periodic_update(contact_counter, buttons)
         contact_counter.debug_print(buttons)
@@ -444,15 +445,17 @@ class ContactCounts:
         self.persistent_data['sample_seconds'] += this_time - self.sample_last_time
 
         # update times for old contacts
-        new_addrs = set([nc.address.address_bytes for nc in new_contacts])
+        new_addrs = {nc.address.address_bytes:nc for nc in new_contacts}
 #        print('new_addrs:',new_addrs)
         old_hoppers = {}
         for addr in list(self.current_encounters.keys()):
             encounter = self.current_encounters[addr]
             if addr in new_addrs:
-#                print('update addr:',addr)
                 encounter.last_seen = this_time
                 encounter.contact_duration += delta_time
+                if encounter.thumbprint:
+                    encounter.thumbprint = make_thumbprint(new_addrs[addr])
+                del new_addrs[addr]
             else:
                 if this_time > encounter.last_seen + setting_end_encounter_time:
                     self.lager.log_del_contact(self.get_total_unique(), addr, self.current_encounters[addr])
@@ -463,35 +466,31 @@ class ContactCounts:
 
 #        print('eek',new_contacts)
         # now for any addresses which are new, create/migrate contacts
-        for nc in new_contacts:
-            addr = nc.address.address_bytes
-#            print('check addr:',addr,self.current_encounters.keys())
-            if not addr in self.current_encounters:
-#                print('add addr:',addr)
-                is_hopper = nc.address.type == _bleio.Address.RANDOM_PRIVATE_RESOLVABLE or nc.address.type == _bleio.Address.RANDOM_PRIVATE_NON_RESOLVABLE
-                if is_hopper:
-                    encounter = None
-                    thumbprint = make_thumbprint(nc)
-                    for haddr,hopper in old_hoppers.items():
-                        if hopper.thumbprint == thumbprint:
-                            # migrate the hopper
-                            del old_hoppers[haddr]
-                            del self.current_encounters[haddr]
-                            encounter = hopper
-                            new_type = 'migrated hopper'
-                            break
-                    if encounter is None:
-                        new_type = 'new hopper'
-                        encounter = self.new_encounter(True, thumbprint)
-                else:
-                    new_bloom = self.check_if_new(addr)
-                    new_type = 'new static' if new_bloom else 'known static'
-                    encounter = self.new_encounter(new_bloom, None)
+        for addr,nc in new_addrs.items():
+            is_hopper = nc.address.type == _bleio.Address.RANDOM_PRIVATE_RESOLVABLE or nc.address.type == _bleio.Address.RANDOM_PRIVATE_NON_RESOLVABLE
+            if is_hopper:
+                encounter = None
+                thumbprint = make_thumbprint(nc)
+                for haddr,hopper in old_hoppers.items():
+                    if hopper.thumbprint == thumbprint:
+                        # migrate the hopper
+                        del old_hoppers[haddr]
+                        del self.current_encounters[haddr]
+                        encounter = hopper
+                        new_type = 'migrated hopper'
+                        break
+                if encounter is None:
+                    new_type = 'new hopper'
+                    encounter = self.new_encounter(True, thumbprint)
+            else:
+                new_bloom = self.check_if_new(addr)
+                new_type = 'new static' if new_bloom else 'known static'
+                encounter = self.new_encounter(new_bloom, None)
 
-                self.lager.log_add_contact(self.get_total_unique(), addr, encounter, new_type)
-                self.current_encounters[addr] = encounter
-                encounter.last_seen = this_time
-                encounter.contact_duration += this_time - self.sample_last_time
+            self.lager.log_add_contact(self.get_total_unique(), addr, encounter, new_type)
+            self.current_encounters[addr] = encounter
+            encounter.last_seen = this_time
+            encounter.contact_duration += this_time - self.sample_last_time
 
         self.sample_last_time = this_time
 
