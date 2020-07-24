@@ -74,7 +74,7 @@ def main():
         eink_module.periodic_update(contact_counter, buttons)
         contact_counter.debug_print(buttons)
         gc.collect()
-        time.sleep(1.0)
+        time.sleep(0.25)
 print('////1020///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 ##################################################################
@@ -83,7 +83,7 @@ print('////1020///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 # the rssi is the signal strength. Play with this until
 # you like the distance things are triggering
 setting_bt_rssi = -80 # -80 is good, -20 is very close, -120 is very far away
-setting_bt_timeout = 0.25 # scan for this many seconds each time
+setting_bt_timeout = 1.0 # scan for this many seconds each time
 setting_end_encounter_time = 5 * 60 # End an encounter after this many seconds of not seeing the device
 
 
@@ -605,11 +605,16 @@ class BluetoothModule:
         self.small_led.direction = digitalio.Direction.OUTPUT
 
     def periodic_update(self, cc, buttons):
-        self.small_led.value = True
+        self.small_led.value = False
+        #t1 = time.monotonic()
         scan_result = self.radio.start_scan(timeout=setting_bt_timeout,
                                             minimum_rssi=setting_bt_rssi)
-        cc.update_contacts(list(scan_result))
-        self.small_led.value = False
+        #t2 = time.monotonic()
+        items = list(scan_result)
+        #t3 = time.monotonic()
+        #print(t2-t1, t3-t2, len(items))
+        cc.update_contacts(list(items))
+        self.small_led.value = True
 
         # update Bluefruit Connect
         if self.radio.connected:
