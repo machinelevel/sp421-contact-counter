@@ -19,7 +19,7 @@ radio = adafruit_ble.BLERadio()
 # the rssi is the signal strength. Play with this until
 # you like the distance things are triggering
 rssi = -80   # -80 is good, -20 is very close, -120 is very far away
-scan_timeout = 0.25
+scan_timeout = 1.0
 
 # set up Bluefruit Connect (from ej)
 if 1:
@@ -55,7 +55,7 @@ def update_contacts(new_contacts):
     stale_time = this_time - 5 * 60 # if no pings for 5 min, drop a contact
 
     # update times for old contacts
-    new_addrs = {nc.address.address_bytes:nc for nc in new_contacts}
+    new_addrs = {nc.address.address_bytes:nc for nc in new_contacts} # removes dupes
     old_hoppers = {}
     for addr in list(current_encounters.keys()):
         encounter = current_encounters[addr]
@@ -128,12 +128,14 @@ while True:
     gc.collect()
     if gc.mem_free() < 5000:
         known_statics.clear()
-    time.sleep(1.0)
     led.value = True
-    time.sleep(0.2)
+    time.sleep(0.25)
     led.value = False
+#    t1 = time.monotonic()
     scan_result = radio.start_scan(timeout=scan_timeout, minimum_rssi=rssi)
-    update_contacts(list(scan_result))
+    items = list(scan_result)
+#    print(time.monotonic() - t1, len(items), addrs_to_hex([item.address.address_bytes for item in items]))
+    update_contacts(items)
 
     num_contacts=total_unique_contacts+debug_test
     debug_text = '{},{} // uniques:{} current:{} free mem:{}k'.format(total_unique_contacts,
