@@ -20,6 +20,13 @@ I've found these links helpful for this project.
 - Circuit playground Bluefruit schematic: https://learn.adafruit.com/adafruit-circuit-playground-bluefruit/downloads
 
 
+Feather links:
+getting started: https://learn.adafruit.com/introducing-the-adafruit-nrf52840-feather/circuitpython
+circuitpython: https://circuitpython.org/board/feather_nrf52840_express/
+Feather eink: https://learn.adafruit.com/adafruit-eink-display-breakouts/circuitpython-code-2
+Feather e-ink quickstart: https://learn.adafruit.com/quickstart-using-adafruit-eink-epaper-displays-with-circuitpython
+3rd pin on short side, far from usb
+
 Batt-level sample from https://learn.adafruit.com/adafruit-feather-m0-adalogger/power-management
 ```c++
 #define VBATPIN A7
