@@ -51,6 +51,7 @@ def make_thumbprint(contact):
     sizes = [len(contact.data_dict[k]) for k in keys]
     return bytes([contact.address.type] + keys + sizes)
 
+is_feather = not hasattr(board, 'D4')
 radio = None
 print('////1010///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
@@ -243,7 +244,8 @@ class HistoryBar:
             maxtext = '{}'.format(int(maxval))
             d.text(maxtext, x+w-tw*len(maxtext), y, Adafruit_EPD.BLACK)
             d.text('2 hours', x, y + h + 1, Adafruit_EPD.BLACK)
-            d.set_window((x-1,y,w+2,h + th + 1))
+            if not is_feather:
+                d.set_window((x-1,y,w+2,h + th + 1))
             d.display()
 
     def set_value(self, index, value):
@@ -542,17 +544,28 @@ print('////1070///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 ##                  you can just delete this whole section
 class ButtonsModule:
     def __init__(self):
-        self.left_button = digitalio.DigitalInOut(board.D4)
-        self.right_button = digitalio.DigitalInOut(board.D5)
-        self.slide_switch = digitalio.DigitalInOut(board.D7)
-        self.left_button.switch_to_input(pull=digitalio.Pull.DOWN)
-        self.right_button.switch_to_input(pull=digitalio.Pull.DOWN)
-        self.slide_switch.switch_to_input(pull=digitalio.Pull.UP)
+        if is_feather:
+            self.left_button = None # TODO
+            self.right_button = None
+            self.slide_switch = None
+        else:
+            self.left_button = digitalio.DigitalInOut(board.D4)
+            self.right_button = digitalio.DigitalInOut(board.D5)
+            self.slide_switch = digitalio.DigitalInOut(board.D7)
+            self.left_button.switch_to_input(pull=digitalio.Pull.DOWN)
+            self.right_button.switch_to_input(pull=digitalio.Pull.DOWN)
+            self.slide_switch.switch_to_input(pull=digitalio.Pull.UP)
     def left(self):
+        if self.left_button is None:
+            return False
         return self.left_button.value
     def right(self):
+        if self.right_button is None:
+            return False
         return self.right_button.value
     def switch(self):
+        if self.slide_switch is None:
+            return False
         return self.slide_switch.value
 ## (end of Buttons section)
 ##################################################################
@@ -601,7 +614,10 @@ class BluetoothModule:
         self.advertisement = ProvideServicesAdvertisement(self.uart_server)
         self.was_connected = False
         self.radio.start_advertising(self.advertisement)
-        self.small_led = digitalio.DigitalInOut(board.D13)
+        if is_feather:
+            self.small_led = digitalio.DigitalInOut(board.D3)
+        else:
+            self.small_led = digitalio.DigitalInOut(board.D13)
         self.small_led.direction = digitalio.Direction.OUTPUT
 
     def periodic_update(self, cc, buttons):
@@ -668,7 +684,8 @@ print('////1201///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class NeopixelModule:
     def __init__(self):
-        self.pixels = neopixel.NeoPixel(board.NEOPIXEL, 10,
+        self.num_pixels = 1 if is_feather else 10
+        self.pixels = neopixel.NeoPixel(board.NEOPIXEL, self.num_pixels,
                                         brightness=0.2, auto_write=False)
         self.pixels_need_update = True
         self.current_displayed_count = -1
@@ -689,7 +706,7 @@ class NeopixelModule:
 
         if self.pixels_need_update:
             self.current_displayed_count = count_to_display
-            for i in range(10):
+            for i in range(self.num_pixels):
                 if i < self.current_displayed_count:
                     self.pixels[i] = self.colorwheel255(100 - i * 10)
                 else:
@@ -704,7 +721,7 @@ class NeopixelModule:
             self.pixels_need_update = True
 
     def set_all(self, color):
-        for i in range(10):
+        for i in range(self.num_pixels):
             self.pixels[i] = color
         self.pixels.show()
 
@@ -730,7 +747,12 @@ class NeopixelModule:
 ## EInk section: If you're not using EInk,
 ##               you can just delete this whole section
 print('////1300///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
-from adafruit_epd.il0373 import Adafruit_IL0373
+if is_feather:
+    from adafruit_epd.ssd1675 import Adafruit_SSD1675
+    eink_type = Adafruit_SSD1675
+else:
+    from adafruit_epd.il0373 import Adafruit_IL0373
+    eink_type = Adafruit_IL0373
 print('////1301///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 from adafruit_epd.epd import Adafruit_EPD
 print('////1302///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
@@ -794,8 +816,12 @@ print('////1400///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class EInkModule:
     def __init__(self):
-        self.width = 152
-        self.height = 152
+        if is_feather:
+            self.width = 250
+            self.height = 122
+        else:
+            self.width = 152
+            self.height = 152
         self.eink_needs_update = True
         self.dirty_rect = [0, 0, self.width, self.height]
 #        self.dirty_rect = None
@@ -809,10 +835,16 @@ class EInkModule:
         self.sramcs_pin = None # None to use internal memory
         self.rst_pin    = digitalio.DigitalInOut(board.A3)
         self.busy_pin   = None
-        self.display = EInkOverride(self.width, self.height, self.spi,
-                                    cs_pin=self.cs_pin, dc_pin=self.dc_pin,
-                                    sramcs_pin=self.sramcs_pin,
-                                    rst_pin=self.rst_pin, busy_pin=self.busy_pin)
+        if is_feather:
+            self.display = Adafruit_SSD1675(self.width, self.height, self.spi,
+                                        cs_pin=self.cs_pin, dc_pin=self.dc_pin,
+                                        sramcs_pin=self.sramcs_pin,
+                                        rst_pin=self.rst_pin, busy_pin=self.busy_pin)
+        else:
+            self.display = EInkOverride(self.width, self.height, self.spi,
+                                        cs_pin=self.cs_pin, dc_pin=self.dc_pin,
+                                        sramcs_pin=self.sramcs_pin,
+                                        rst_pin=self.rst_pin, busy_pin=self.busy_pin)
 
     def periodic_update(self, cc, buttons):
         num_unique = cc.get_total_unique()
@@ -821,7 +853,8 @@ class EInkModule:
         update_time_ok = self.last_update_time is None or \
                          time.monotonic() - self.last_update_time > self.min_update_time
 
-        self.check_low_battery_warning(cc)
+        if not is_feather:
+            self.check_low_battery_warning(cc)
 
         if self.eink_needs_update and update_time_ok:
             self.displayed_unique_contacts = num_unique
@@ -862,7 +895,8 @@ class EInkModule:
         d = self.display
         d.fill_rect(x, y, w, h, Adafruit_EPD.WHITE)
         d.text(message, x, y, Adafruit_EPD.BLACK)
-        d.set_window((x,y,w,h))
+        if not is_feather:
+            d.set_window((x,y,w,h))
         d.display()
 
     def draw_everything(self, cc):
@@ -877,9 +911,10 @@ class EInkModule:
         d.fill_rect(5, 5, 10, 10, Adafruit_EPD.RED)
         d.rect(0, 0, 20, 30, Adafruit_EPD.BLACK)
 
-        print("Draw lines")
-        d.line(0, 0, d.width - 1, d.height - 1, Adafruit_EPD.BLACK)
-        d.line(0, d.height - 1, d.width - 1, 0, Adafruit_EPD.RED)
+        if not is_feather:
+            print("Draw lines")
+            d.line(0, 0, d.width - 1, d.height - 1, Adafruit_EPD.BLACK)
+            d.line(0, d.height - 1, d.width - 1, 0, Adafruit_EPD.RED)
 
         # print("Draw text")
         # out_text = '{}'.format(self.displayed_unique_contacts)
@@ -895,7 +930,8 @@ class EInkModule:
         self.draw_big_number(self.displayed_unique_contacts, 76, 76, font_motor, do_clear=False)
 
         if self.dirty_rect:
-            d.set_window(self.dirty_rect)
+            if not is_feather:
+                d.set_window(self.dirty_rect)
             d.display()
             self.dirty_rect = None
             if cc.is_low_power:
@@ -931,6 +967,15 @@ class EInkModule:
             offset = font['offsets'][c]
             self.draw_simple_image(font, x, y, invert_bits=True, do_clear=do_clear, row_start=offset[0], h=offset[1])
             x += x_step
+
+    def draw_fullscreen_from_file(self, filename):
+        try:
+            fsize = get_file_size(filename)
+            with open(self.filename,'rb') as f:
+                f.readinto(xxxxx)
+        except Exception as ex:
+            btprint('Unable to load bloom file, creating new: {}'.format(ex))
+
 
     def draw_simple_image(self, image_data, x, y, invert_bits=False, do_clear=True, row_start=0, h=None):
         bp = image_data['black_pixels']
@@ -986,7 +1031,7 @@ _IL0373_PARTIAL_OUT = const(0x92)
 
 _IL0373_LOW_POWER_DETECT = const(0x51)
 
-class EInkOverride(Adafruit_IL0373):
+class EInkOverride(eink_type):
     def __init__(self, width, height, spi, cs_pin, dc_pin,
                  sramcs_pin, rst_pin, busy_pin):
         self.window_rect = None
