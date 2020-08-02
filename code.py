@@ -845,6 +845,7 @@ class EInkModule:
                                         cs_pin=self.cs_pin, dc_pin=self.dc_pin,
                                         sramcs_pin=self.sramcs_pin,
                                         rst_pin=self.rst_pin, busy_pin=self.busy_pin)
+        self.framebuf = [self.display._buffer1, self.display._buffer2]
 
     def periodic_update(self, cc, buttons):
         num_unique = cc.get_total_unique()
@@ -899,22 +900,49 @@ class EInkModule:
             d.set_window((x,y,w,h))
         d.display()
 
+    def draw_backdrop(self):
+        with open('images/backdrop2.tsu', 'rb') as f:
+            num_bytes = (self.width >> 3) * self.height
+            f.readinto(self.framebuf[0], num_bytes)
+            f.readinto(self.framebuf[1], num_bytes)
+
+    def draw_dial(self, x, y, num_tics):
+        if num_tics > 0:
+            filename = 'images/tics_a{}.tsu'.format(num_tics)
+            w = h = 48
+            img = [0,0]
+            with open(filename, 'rb') as f:
+                num_bytes = (w >> 3) * h
+                img = [f.read(num_bytes), f.read(num_bytes)]
+            src_rowbytes = w >> 3
+            dst_rowbytes = self.width >> 3
+            for i in range(2):
+                src = img[i]
+                dst = self.framebuf[i]
+                src_row = 0
+                dst_row = (x >> 3) + dst_rowbytes * y
+                for y in range(h):
+                    for rx in range(w >> 3):
+                        dst[dst_row + rx] &= src[src_row + rx]
+                    src_row += src_rowbytes
+                    dst_row += dst_rowbytes
+
     def draw_everything(self, cc):
         # draw stuff here
         d = self.display
 
-        print("Clear buffer")
-        d.fill(Adafruit_EPD.WHITE)
-        d.pixel(10, 100, Adafruit_EPD.BLACK)
+        # print("Clear buffer")
+        # d.fill(Adafruit_EPD.WHITE)
+        # d.pixel(10, 100, Adafruit_EPD.BLACK)
 
-        print("Draw Rectangles")
-        d.fill_rect(5, 5, 10, 10, Adafruit_EPD.RED)
-        d.rect(0, 0, 20, 30, Adafruit_EPD.BLACK)
+        # print("Draw Rectangles")
+        # d.fill_rect(5, 5, 10, 10, Adafruit_EPD.RED)
+        # d.rect(0, 0, 20, 30, Adafruit_EPD.BLACK)
 
-        if not is_feather:
-            print("Draw lines")
-            d.line(0, 0, d.width - 1, d.height - 1, Adafruit_EPD.BLACK)
-            d.line(0, d.height - 1, d.width - 1, 0, Adafruit_EPD.RED)
+        # if not is_feather:
+        #     print("Draw lines")
+        #     d.line(0, 0, d.width - 1, d.height - 1, Adafruit_EPD.BLACK)
+        #     d.line(0, d.height - 1, d.width - 1, 0, Adafruit_EPD.RED)
 
         # print("Draw text")
         # out_text = '{}'.format(self.displayed_unique_contacts)
@@ -924,6 +952,11 @@ class EInkModule:
         # h = 12
         # d.text(out_text, x, y, Adafruit_EPD.BLACK)
         # self.add_dirty_rect([x, y, w, h])
+
+        self.draw_backdrop()
+        self.draw_dial(8, 88, 10)
+        self.draw_dial(52, 104, 4)
+        self.draw_dial(104, 88, 1)
 
         print('draw big number')
         self.draw_big_number(self.displayed_unique_contacts, 76, 76, font_motor, do_clear=True)
