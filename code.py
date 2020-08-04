@@ -64,7 +64,7 @@ def main():
     contact_counter = ContactCounts()
     bt_module = BluetoothModule()
     neo_module = NeopixelModule()
-    eink_module = EInkModule()
+    eink_module = EInkModule(contact_counter)
     buttons = ButtonsModule()
 
     while True:
@@ -212,41 +212,43 @@ class HistoryBar:
             self.save()
             btprint('updated historybar {} {}'.format(next_index,count_to_display))
 
+    def draw(self, eink):
+        btprint('drawing historybar...')
+        t = time.monotonic()
+        self.last_draw_time = t
+        x = (eink.width - self.num_columns) >> 1
+        y = 16
+        w = self.num_columns
+        h = 32
+        tw = 6
+        th = 8
+        basey = y + h - 1
+        d = eink.display
+        d.fill_rect(x, y, w, h, Adafruit_EPD.WHITE)
+        d.fill_rect(x-1, basey, w+2, 1, Adafruit_EPD.BLACK)
+        maxval = 0
+        for i in range(self.num_columns):
+            maxval = max(maxval, self.get_value(i))
+        if maxval > 0:
+            if maxval < 10:
+                maxval = 10
+            scale = h / maxval
+            if scale < 1.0:
+                scale = 1.0
+            for i in range(self.num_columns):
+                dx = (i + self.num_columns - self.start_index) % self.num_columns
+                dsize = int(scale * self.get_value(i))
+                if dsize:
+                    d.fill_rect(x+dx, basey - dsize, 1, dsize, Adafruit_EPD.BLACK)
+        maxtext = '{}'.format(int(maxval))
+        d.text(maxtext, x+w-tw*len(maxtext), y, Adafruit_EPD.BLACK)
+        d.text('2 hours', x, y + h + 1, Adafruit_EPD.BLACK)
+        eink.add_dirty_rect((x-1,y,w+2,h + th + 1))
+
     def draw_update(self, eink):
         t = time.monotonic()
         if t - self.last_draw_time > self.draw_period:
-            btprint('drawing historybar...')
-            self.last_draw_time = t
-            x = (eink.width - self.num_columns) >> 1
-            y = 16
-            w = self.num_columns
-            h = 32
-            tw = 6
-            th = 8
-            basey = y + h - 1
-            d = eink.display
-            d.fill_rect(x, y, w, h, Adafruit_EPD.WHITE)
-            d.fill_rect(x-1, basey, w+2, 1, Adafruit_EPD.BLACK)
-            maxval = 0
-            for i in range(self.num_columns):
-                maxval = max(maxval, self.get_value(i))
-            if maxval > 0:
-                if maxval < 10:
-                    maxval = 10
-                scale = h / maxval
-                if scale < 1.0:
-                    scale = 1.0
-                for i in range(self.num_columns):
-                    dx = (i + self.num_columns - self.start_index) % self.num_columns
-                    dsize = int(scale * self.get_value(i))
-                    if dsize:
-                        d.fill_rect(x+dx, basey - dsize, 1, dsize, Adafruit_EPD.BLACK)
-            maxtext = '{}'.format(int(maxval))
-            d.text(maxtext, x+w-tw*len(maxtext), y, Adafruit_EPD.BLACK)
-            d.text('2 hours', x, y + h + 1, Adafruit_EPD.BLACK)
-            if not is_feather:
-                d.set_window((x-1,y,w+2,h + th + 1))
-            d.display()
+            self.draw(eink)
 
     def set_value(self, index, value):
         i = index << 1
@@ -350,7 +352,7 @@ class ContactCounts:
         self.startup_time = time.monotonic()
         self.current_encounters = {}
         self.check_for_hoppers = True
-        self.persistent_data = {'unique_counts':0,'sample_seconds':0}
+        self.persistent_data = {'unique_counts':0,'sample_seconds':0, '5min':0, '30min':0, '2hour':0}
         self.count_file_name = '/data_counter.txt'
         self.need_save = False
         self.is_low_power = False
@@ -815,7 +817,7 @@ font_motor = {'width':24,
 print('////1400///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class EInkModule:
-    def __init__(self):
+    def __init__(self, cc):
         if is_feather:
             self.width = 250
             self.height = 122
@@ -823,10 +825,12 @@ class EInkModule:
             self.width = 152
             self.height = 152
         self.eink_needs_update = True
-        self.dirty_rect = [0, 0, self.width, self.height]
-#        self.dirty_rect = None
+        self.dirty_rects = [(0, 0, self.width, self.height)]
+        self.dials_displayed = [0,0,0]
+        self.dials_src = ('5min', '30min', '2hour')
+        self.dials_pos = ((0,85),(52,104),(104,85))
+        self.next_dirty_update_time = time.monotonic()
         self.min_update_time = 15.0
-        self.last_update_time = None
         self.displayed_unique_contacts = -1
         self.displaying_low_batt_warning = False
         self.spi = busio.SPI(board.SCL, MOSI=board.SDA)
@@ -846,22 +850,19 @@ class EInkModule:
                                         sramcs_pin=self.sramcs_pin,
                                         rst_pin=self.rst_pin, busy_pin=self.busy_pin)
         self.framebuf = [self.display._buffer1, self.display._buffer2]
+        self.draw_everything(cc)
 
     def periodic_update(self, cc, buttons):
         num_unique = cc.get_total_unique()
         if num_unique != self.displayed_unique_contacts:
-            self.eink_needs_update = True;
-        update_time_ok = self.last_update_time is None or \
-                         time.monotonic() - self.last_update_time > self.min_update_time
+            self.draw_big_number(num_unique, do_clear=True)
+            self.draw_big_number(num_unique, do_clear=False)
 
+            self.eink_needs_update = True;
         if not is_feather:
             self.check_low_battery_warning(cc)
-
-        if self.eink_needs_update and update_time_ok:
-            self.displayed_unique_contacts = num_unique
-            self.draw_everything(cc)
-            self.eink_needs_update = False
-            self.last_update_time = time.monotonic()
+        self.draw_dials(cc, force=False)
+        self.update_dirty_rects()
 
     def check_low_battery_warning(self, cc):
         low_batt = self.display.check_low_battery_warning()
@@ -873,7 +874,6 @@ class EInkModule:
             self.draw_tiny_text((24, 24, message))
             if low_batt:
                 time.sleep(15)
-
 
     def set_low_power(self, low_power):
         if low_power:
@@ -908,9 +908,13 @@ class EInkModule:
 
     def draw_dial(self, x, y, num_tics):
         if num_tics > 0:
+            if num_tics > 12:
+                num_tics = 12
             filename = 'images/tics_a{}.tsu'.format(num_tics)
             w = h = 48
+            self.add_dirty_rect((x, y, w, h))
             img = [0,0]
+            shift = x & 7
             with open(filename, 'rb') as f:
                 num_bytes = (w >> 3) * h
                 img = [f.read(num_bytes), f.read(num_bytes)]
@@ -921,81 +925,69 @@ class EInkModule:
                 dst = self.framebuf[i]
                 src_row = 0
                 dst_row = (x >> 3) + dst_rowbytes * y
-                for y in range(h):
-                    for rx in range(w >> 3):
-                        dst[dst_row + rx] &= src[src_row + rx]
+                tail = 0xff
+                for ry in range(h):
+                    if shift:
+                        for rx in range(src_rowbytes):
+                            sp = ~src[src_row + rx]
+                            head = ~(sp >> shift) | (0xff << (8 - shift))
+                            dst[dst_row + rx] &= head & tail
+                            tail = ~(sp << (8 - shift)) & 0xff
+                        if tail != 0xff:
+                            dst[dst_row + rx] &= tail
+                    else:
+                        for rx in range(src_rowbytes):
+                            dst[dst_row + rx] &= src[src_row + rx]
+
                     src_row += src_rowbytes
                     dst_row += dst_rowbytes
 
+    def draw_dials(self, cc, force):
+        for i in range(len(self.dials_src)):
+            val = cc.persistent_data[self.dials_src[i]]
+            if force or val != self.dials_displayed[i]:
+                self.draw_dial(self.dials_pos[i][0], self.dials_pos[i][1], val)
+                self.dials_displayed[i] = val
+
     def draw_everything(self, cc):
         # draw stuff here
-        d = self.display
-
-        # print("Clear buffer")
-        # d.fill(Adafruit_EPD.WHITE)
-        # d.pixel(10, 100, Adafruit_EPD.BLACK)
-
-        # print("Draw Rectangles")
-        # d.fill_rect(5, 5, 10, 10, Adafruit_EPD.RED)
-        # d.rect(0, 0, 20, 30, Adafruit_EPD.BLACK)
-
-        # if not is_feather:
-        #     print("Draw lines")
-        #     d.line(0, 0, d.width - 1, d.height - 1, Adafruit_EPD.BLACK)
-        #     d.line(0, d.height - 1, d.width - 1, 0, Adafruit_EPD.RED)
-
-        # print("Draw text")
-        # out_text = '{}'.format(self.displayed_unique_contacts)
-        # x = 25
-        # y = 70
-        # w = 8 * len(out_text)
-        # h = 12
-        # d.text(out_text, x, y, Adafruit_EPD.BLACK)
-        # self.add_dirty_rect([x, y, w, h])
-
         self.draw_backdrop()
-        self.draw_dial(8, 88, 10)
-        self.draw_dial(52, 104, 4)
-        self.draw_dial(104, 88, 1)
-
-        print('draw big number')
-        self.draw_big_number(self.displayed_unique_contacts, 76, 76, font_motor, do_clear=True)
-        self.draw_big_number(self.displayed_unique_contacts, 76, 76, font_motor, do_clear=False)
-
-        if self.dirty_rect:
-            if not is_feather:
-                d.set_window(self.dirty_rect)
-            d.display()
-            self.dirty_rect = None
-            if cc.is_low_power:
-                d.busy_wait()
-                time.sleep(0.2)
-                d.power_down()
+        if cc.history_bar:
+            cc.history_bar.draw(self)
+        num_unique = cc.get_total_unique()
+        self.draw_big_number(num_unique, do_clear=False)
+        self.draw_dials(cc, force=True)
+        self.dirty_rects = [(0, 0, self.width, self.height)]
         print('draw done')
 
     def add_dirty_rect(self, r):
-        if self.dirty_rect is None:
-            ox1,oy1,ox2,oy2 = (self.width, self.height, 0, 0)
-        else:
-            ox1,oy1,ox2,oy2 = self.dirty_rect
-            ox2 += ox1
-            oy2 += oy1
-        nx1,ny1,nx2,ny2 = r
-        nx2 += nx1
-        ny2 += ny1
-        nx1 =  min(nx1, ox1) & 0xf8
-        ny1 =  min(ny1, oy1)
-        nx2 = (max(nx2, ox2) + 0x07) & 0xf8
-        ny2 =  max(ny2, oy2)
-        self.dirty_rect = [nx1, ny1, nx2 - nx1, ny2 - ny1]
+        if not r in self.dirty_rects:
+            self.dirty_rects.append(r)
 
-    def draw_big_number(self, val, x, y, font, do_clear=False):
+    def update_dirty_rects(self):
+        if self.dirty_rects:
+            now_time = time.monotonic()
+            if now_time >= self.next_dirty_update_time:
+                self.next_dirty_update_time = now_time + self.min_update_time
+                d = self.display
+                if not is_feather:
+                    d.set_window(self.dirty_rects.pop(0))
+                d.display()
+
+    def draw_big_number(self, val, do_clear=False):
+        self.displayed_unique_contacts = val
+        x = 76
+        y = 74
+        font = font_motor
         x_step = 22-3
         y_size = 20
         text = '{}'.format(val)
         total_width = x_step * len(text)
         x -= total_width >> 1 # center it
         y -= y_size >> 1 # center it
+
+        self.add_dirty_rect((x, y, total_width, y_size))
+
         for c in text:
             offset = font['offsets'][c]
             self.draw_simple_image(font, x, y, invert_bits=True, do_clear=do_clear, row_start=offset[0], h=offset[1])
@@ -1016,7 +1008,6 @@ class EInkModule:
         if h is None:
             h = image_data['height']
         row_bytes = w >> 3
-        self.add_dirty_rect([x, y, w, h])
 #        print('len(bp)', len(bp))
         index = row_start * row_bytes
         for row in range(h):
