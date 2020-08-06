@@ -848,7 +848,6 @@ class EInkModule:
         else:
             self.width = 152
             self.height = 152
-        self.eink_needs_update = True
         self.dirty_rects = [(0, 0, self.width, self.height)]
         self.dials_displayed = [0,0,0]
         self.dials_src = ('5min', '30min', '2hour')
@@ -877,15 +876,16 @@ class EInkModule:
         self.draw_everything(cc)
 
     def periodic_update(self, cc, buttons):
-        num_unique = cc.get_total_unique()
-        if num_unique != self.displayed_unique_contacts:
-            self.draw_big_number(num_unique, do_clear=True)
-            self.draw_big_number(num_unique, do_clear=False)
-
-            self.eink_needs_update = True;
         if not is_feather:
             self.check_low_battery_warning(cc)
         self.draw_dials(cc, force=False)
+        num_unique = cc.get_total_unique()
+        if num_unique != self.displayed_unique_contacts:
+            if num_unique < self.displayed_unique_contacts:
+                self.draw_everything()
+            else:
+                self.draw_big_number(num_unique, do_clear=True)
+                self.draw_big_number(num_unique, do_clear=False)
         self.update_dirty_rects()
 
     def check_low_battery_warning(self, cc):
@@ -907,7 +907,6 @@ class EInkModule:
             self.display.power_down()
         else:
             self.min_update_time = 15.0
-            self.eink_needs_update = True
         # Show the icon
         message = 'BATT SAVER MODE' if low_power else '               '
         self.draw_tiny_text((24, 36, message))
