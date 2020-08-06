@@ -102,6 +102,7 @@ class Encounter:
         self.contact_duration = 0.0         # Integration over time
         self.is_new_device = is_new_device  # First contact for this device
         self.thumbprint = hopper_thumbprint # to help identify hopper-buddies
+        self.is_home_device = False         # These devices don't get counted
 print('////1030///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class Bloom:
@@ -204,7 +205,8 @@ class HistoryBar:
             count_to_display = 0
             for enc in cc.current_encounters.values():
                 if t - enc.last_seen < self.update_period:
-                    count_to_display += 1
+                    if not enc.is_home_device:
+                        count_to_display += 1
             next_index = self.start_index
             self.start_index += 1
             self.start_index %= self.num_columns
@@ -350,9 +352,11 @@ print('////1060///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 class ContactCounts:
     def __init__(self):
         self.startup_time = time.monotonic()
+        self.home_count_begin = time.monotonic()
         self.current_encounters = {}
+        self.homies = set() # addresses of home devices we don't need to count
         self.check_for_hoppers = True
-        self.persistent_data = {'unique_counts':0,'sample_seconds':0, '5min':0, '30min':0, '2hour':0}
+        self.persistent_data = {'unique_counts':0, 'sample_seconds':0, '5min':0, '30min':0, '2hour':0}
         self.count_file_name = '/data_counter.txt'
         self.need_save = False
         self.is_low_power = False
@@ -413,6 +417,7 @@ class ContactCounts:
         self.scan_serial_number = 0
         self.persistent_data['unique_counts'] = 0
         self.persistent_data['sample_seconds'] = 0
+        self.home_count_begin = time.monotonic()
 
     def check_if_new(self, addr):
         is_new = True
@@ -420,8 +425,12 @@ class ContactCounts:
             is_new = self.bloom.add(addr)
         return is_new
 
+    def in_home_mode(self):
+        home_count_minutes = 2 # stay in home mode for this many minutes after startup or reset
+        return time.monotonic() < self.home_count_begin + 60 * home_count_minutes
+
     def new_encounter(self, new_bloom, thumbprint):
-        if new_bloom:
+        if new_bloom and not self.in_home_mode():
             self.persistent_data['unique_counts'] += 1
             self.need_save = True
         return Encounter(new_bloom, thumbprint)
@@ -487,9 +496,17 @@ class ContactCounts:
                     new_type = 'new hopper'
                     encounter = self.new_encounter(True, thumbprint)
             else:
-                new_bloom = self.check_if_new(addr)
+                new_bloom = self.check_if_new(addr) and not addr in self.homies
                 new_type = 'new static' if new_bloom else 'known static'
                 encounter = self.new_encounter(new_bloom, None)
+
+            if self.in_home_mode():
+                encounter.is_home_device = True
+                if not is_hopper:
+                    self.homies.add(addr)
+            else:
+                if addr in self.homies:
+                    encounter.is_home_device = True
 
             self.lager.log_add_contact(self.get_total_unique(), addr, encounter, new_type)
             self.current_encounters[addr] = encounter
@@ -691,6 +708,7 @@ class NeopixelModule:
                                         brightness=0.2, auto_write=False)
         self.pixels_need_update = True
         self.current_displayed_count = -1
+        self.current_displayed_home_count = -1
 
     def periodic_update(self, cc, buttons):
         if cc.is_low_power:
@@ -699,17 +717,23 @@ class NeopixelModule:
         # One light for each encounter still active as of a minute ago
         t = time.monotonic()
         count_to_display = 0
+        home_count_to_display = 0
         for enc in cc.current_encounters.values():
             if t - enc.last_seen < 60:
                 count_to_display += 1
+                if enc.is_home_device:
+                    home_count_to_display += 1
 
-        if count_to_display != self.current_displayed_count:
+        if count_to_display != self.current_displayed_count or home_count_to_display != self.current_displayed_home_count:
             self.pixels_need_update = True
 
         if self.pixels_need_update:
             self.current_displayed_count = count_to_display
+            self.current_displayed_home_count = home_count_to_display
             for i in range(self.num_pixels):
                 if i < self.current_displayed_count:
+                    self.pixels[i] = (0,16,32)
+                elif i < self.current_displayed_count:
                     self.pixels[i] = self.colorwheel255(100 - i * 10)
                 else:
                     self.pixels[i] = (0,0,0)
