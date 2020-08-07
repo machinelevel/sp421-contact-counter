@@ -100,6 +100,7 @@ class Encounter:
         self.first_seen = time.monotonic()  # When did this contact start
         self.last_seen = time.monotonic()   # When did we last see this device
         self.contact_duration = 0.0         # Integration over time
+        self.dial_time = 0                  # time reported on contact dials
         self.is_new_device = is_new_device  # First contact for this device
         self.thumbprint = hopper_thumbprint # to help identify hopper-buddies
         self.is_home_device = False         # These devices don't get counted
@@ -369,7 +370,29 @@ class ContactCounts:
         self.lager.log_startup(self.get_total_unique())
         # self.histogram = Histogram('/histogram.bin')
 
+    def update_dials(self):
+        # TODO simplify this
+        for addr,enc in self.current_encounters.items():
+            if not enc.is_home_device:
+                total_time = enc.last_seen - enc.first_seen
+                t = 5 * 60
+                if enc.dial_time < t and total_time >= t:
+                    self.persistent_data['5min'] += 1
+                    self.need_save = True
+                t = 30 * 60
+                if enc.dial_time < t and total_time >= t:
+                    self.persistent_data['5min'] = max(0, self.persistent_data['5min'] - 1)
+                    self.persistent_data['30min'] += 1
+                    self.need_save = True
+                t = 120 * 60
+                if enc.dial_time < t and total_time >= t:
+                    self.persistent_data['30min'] = max(0, self.persistent_data['30min'] - 1)
+                    self.persistent_data['2hour'] += 1
+                    self.need_save = True
+                enc.dial_time = total_time
+
     def periodic_update(self, buttons, neo_module=None, eink_module=None):
+        self.update_dials()
         self.scan_serial_number += 1
         if self.history_bar is not None:
             self.history_bar.periodic_update(self)
@@ -417,6 +440,9 @@ class ContactCounts:
         self.scan_serial_number = 0
         self.persistent_data['unique_counts'] = 0
         self.persistent_data['sample_seconds'] = 0
+        self.persistent_data['5min'] = 0
+        self.persistent_data['30min'] = 0
+        self.persistent_data['2hour'] = 0
         self.home_count_begin = time.monotonic()
 
     def check_if_new(self, addr):
@@ -731,7 +757,7 @@ class NeopixelModule:
             self.current_displayed_count = count_to_display
             self.current_displayed_home_count = home_count_to_display
             for i in range(self.num_pixels):
-                if i < self.current_displayed_count:
+                if i < self.current_displayed_home_count:
                     self.pixels[i] = (0,16,32)
                 elif i < self.current_displayed_count:
                     self.pixels[i] = self.colorwheel255(100 - i * 10)
@@ -882,7 +908,7 @@ class EInkModule:
         num_unique = cc.get_total_unique()
         if num_unique != self.displayed_unique_contacts:
             if num_unique < self.displayed_unique_contacts:
-                self.draw_everything()
+                self.draw_everything(cc)
             else:
                 self.draw_big_number(num_unique, do_clear=True)
                 self.draw_big_number(num_unique, do_clear=False)
@@ -980,7 +1006,10 @@ class EInkModule:
         num_unique = cc.get_total_unique()
         self.draw_big_number(num_unique, do_clear=False)
         self.draw_dials(cc, force=True)
-        self.dirty_rects = [(0, 0, self.width, self.height)]
+        self.dirty_rects = []
+        d = self.display
+        d.set_window((0, 0, self.width, self.height))
+        d.display()
         print('draw done')
 
     def add_dirty_rect(self, r):
