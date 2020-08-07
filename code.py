@@ -51,6 +51,7 @@ def make_thumbprint(contact):
     sizes = [len(contact.data_dict[k]) for k in keys]
     return bytes([contact.address.type] + keys + sizes)
 
+is_feather = not hasattr(board, 'D4')
 radio = None
 print('////1010///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
@@ -63,7 +64,7 @@ def main():
     contact_counter = ContactCounts()
     bt_module = BluetoothModule()
     neo_module = NeopixelModule()
-    eink_module = EInkModule()
+    eink_module = EInkModule(contact_counter)
     buttons = ButtonsModule()
 
     while True:
@@ -99,8 +100,10 @@ class Encounter:
         self.first_seen = time.monotonic()  # When did this contact start
         self.last_seen = time.monotonic()   # When did we last see this device
         self.contact_duration = 0.0         # Integration over time
+        self.dial_time = 0                  # time reported on contact dials
         self.is_new_device = is_new_device  # First contact for this device
         self.thumbprint = hopper_thumbprint # to help identify hopper-buddies
+        self.is_home_device = False         # These devices don't get counted
 print('////1030///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class Bloom:
@@ -203,7 +206,8 @@ class HistoryBar:
             count_to_display = 0
             for enc in cc.current_encounters.values():
                 if t - enc.last_seen < self.update_period:
-                    count_to_display += 1
+                    if not enc.is_home_device:
+                        count_to_display += 1
             next_index = self.start_index
             self.start_index += 1
             self.start_index %= self.num_columns
@@ -211,40 +215,43 @@ class HistoryBar:
             self.save()
             btprint('updated historybar {} {}'.format(next_index,count_to_display))
 
+    def draw(self, eink):
+        btprint('drawing historybar...')
+        t = time.monotonic()
+        self.last_draw_time = t
+        x = (eink.width - self.num_columns) >> 1
+        y = 16
+        w = self.num_columns
+        h = 32
+        tw = 6
+        th = 8
+        basey = y + h - 1
+        d = eink.display
+        d.fill_rect(x, y, w, h, Adafruit_EPD.WHITE)
+        d.fill_rect(x-1, basey, w+2, 1, Adafruit_EPD.BLACK)
+        maxval = 0
+        for i in range(self.num_columns):
+            maxval = max(maxval, self.get_value(i))
+        if maxval > 0:
+            if maxval < 10:
+                maxval = 10
+            scale = h / maxval
+            if scale < 1.0:
+                scale = 1.0
+            for i in range(self.num_columns):
+                dx = (i + self.num_columns - self.start_index) % self.num_columns
+                dsize = int(scale * self.get_value(i))
+                if dsize:
+                    d.fill_rect(x+dx, basey - dsize, 1, dsize, Adafruit_EPD.BLACK)
+        maxtext = '{}'.format(int(maxval))
+        d.text(maxtext, x+w-tw*len(maxtext), y, Adafruit_EPD.BLACK)
+        d.text('2 hours', x, y + h + 1, Adafruit_EPD.BLACK)
+        eink.add_dirty_rect((x-1,y,w+2,h + th + 1))
+
     def draw_update(self, eink):
         t = time.monotonic()
         if t - self.last_draw_time > self.draw_period:
-            btprint('drawing historybar...')
-            self.last_draw_time = t
-            x = (eink.width - self.num_columns) >> 1
-            y = 16
-            w = self.num_columns
-            h = 32
-            tw = 6
-            th = 8
-            basey = y + h - 1
-            d = eink.display
-            d.fill_rect(x, y, w, h, Adafruit_EPD.WHITE)
-            d.fill_rect(x-1, basey, w+2, 1, Adafruit_EPD.BLACK)
-            maxval = 0
-            for i in range(self.num_columns):
-                maxval = max(maxval, self.get_value(i))
-            if maxval > 0:
-                if maxval < 10:
-                    maxval = 10
-                scale = h / maxval
-                if scale < 1.0:
-                    scale = 1.0
-                for i in range(self.num_columns):
-                    dx = (i + self.num_columns - self.start_index) % self.num_columns
-                    dsize = int(scale * self.get_value(i))
-                    if dsize:
-                        d.fill_rect(x+dx, basey - dsize, 1, dsize, Adafruit_EPD.BLACK)
-            maxtext = '{}'.format(int(maxval))
-            d.text(maxtext, x+w-tw*len(maxtext), y, Adafruit_EPD.BLACK)
-            d.text('2 hours', x, y + h + 1, Adafruit_EPD.BLACK)
-            d.set_window((x-1,y,w+2,h + th + 1))
-            d.display()
+            self.draw(eink)
 
     def set_value(self, index, value):
         i = index << 1
@@ -346,9 +353,11 @@ print('////1060///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 class ContactCounts:
     def __init__(self):
         self.startup_time = time.monotonic()
+        self.home_count_begin = time.monotonic()
         self.current_encounters = {}
+        self.homies = set() # addresses of home devices we don't need to count
         self.check_for_hoppers = True
-        self.persistent_data = {'unique_counts':0,'sample_seconds':0}
+        self.persistent_data = {'unique_counts':0, 'sample_seconds':0, '5min':0, '30min':0, '2hour':0}
         self.count_file_name = '/data_counter.txt'
         self.need_save = False
         self.is_low_power = False
@@ -361,7 +370,29 @@ class ContactCounts:
         self.lager.log_startup(self.get_total_unique())
         # self.histogram = Histogram('/histogram.bin')
 
+    def update_dials(self):
+        # TODO simplify this
+        for addr,enc in self.current_encounters.items():
+            if not enc.is_home_device:
+                total_time = enc.last_seen - enc.first_seen
+                t = 5 * 60
+                if enc.dial_time < t and total_time >= t:
+                    self.persistent_data['5min'] += 1
+                    self.need_save = True
+                t = 30 * 60
+                if enc.dial_time < t and total_time >= t:
+                    self.persistent_data['5min'] = max(0, self.persistent_data['5min'] - 1)
+                    self.persistent_data['30min'] += 1
+                    self.need_save = True
+                t = 120 * 60
+                if enc.dial_time < t and total_time >= t:
+                    self.persistent_data['30min'] = max(0, self.persistent_data['30min'] - 1)
+                    self.persistent_data['2hour'] += 1
+                    self.need_save = True
+                enc.dial_time = total_time
+
     def periodic_update(self, buttons, neo_module=None, eink_module=None):
+        self.update_dials()
         self.scan_serial_number += 1
         if self.history_bar is not None:
             self.history_bar.periodic_update(self)
@@ -409,6 +440,10 @@ class ContactCounts:
         self.scan_serial_number = 0
         self.persistent_data['unique_counts'] = 0
         self.persistent_data['sample_seconds'] = 0
+        self.persistent_data['5min'] = 0
+        self.persistent_data['30min'] = 0
+        self.persistent_data['2hour'] = 0
+        self.home_count_begin = time.monotonic()
 
     def check_if_new(self, addr):
         is_new = True
@@ -416,8 +451,12 @@ class ContactCounts:
             is_new = self.bloom.add(addr)
         return is_new
 
+    def in_home_mode(self):
+        home_count_minutes = 2 # stay in home mode for this many minutes after startup or reset
+        return time.monotonic() < self.home_count_begin + 60 * home_count_minutes
+
     def new_encounter(self, new_bloom, thumbprint):
-        if new_bloom:
+        if new_bloom and not self.in_home_mode():
             self.persistent_data['unique_counts'] += 1
             self.need_save = True
         return Encounter(new_bloom, thumbprint)
@@ -483,9 +522,17 @@ class ContactCounts:
                     new_type = 'new hopper'
                     encounter = self.new_encounter(True, thumbprint)
             else:
-                new_bloom = self.check_if_new(addr)
+                new_bloom = self.check_if_new(addr) and not addr in self.homies
                 new_type = 'new static' if new_bloom else 'known static'
                 encounter = self.new_encounter(new_bloom, None)
+
+            if self.in_home_mode():
+                encounter.is_home_device = True
+                if not is_hopper:
+                    self.homies.add(addr)
+            else:
+                if addr in self.homies:
+                    encounter.is_home_device = True
 
             self.lager.log_add_contact(self.get_total_unique(), addr, encounter, new_type)
             self.current_encounters[addr] = encounter
@@ -542,17 +589,28 @@ print('////1070///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 ##                  you can just delete this whole section
 class ButtonsModule:
     def __init__(self):
-        self.left_button = digitalio.DigitalInOut(board.D4)
-        self.right_button = digitalio.DigitalInOut(board.D5)
-        self.slide_switch = digitalio.DigitalInOut(board.D7)
-        self.left_button.switch_to_input(pull=digitalio.Pull.DOWN)
-        self.right_button.switch_to_input(pull=digitalio.Pull.DOWN)
-        self.slide_switch.switch_to_input(pull=digitalio.Pull.UP)
+        if is_feather:
+            self.left_button = None # TODO
+            self.right_button = None
+            self.slide_switch = None
+        else:
+            self.left_button = digitalio.DigitalInOut(board.D4)
+            self.right_button = digitalio.DigitalInOut(board.D5)
+            self.slide_switch = digitalio.DigitalInOut(board.D7)
+            self.left_button.switch_to_input(pull=digitalio.Pull.DOWN)
+            self.right_button.switch_to_input(pull=digitalio.Pull.DOWN)
+            self.slide_switch.switch_to_input(pull=digitalio.Pull.UP)
     def left(self):
+        if self.left_button is None:
+            return False
         return self.left_button.value
     def right(self):
+        if self.right_button is None:
+            return False
         return self.right_button.value
     def switch(self):
+        if self.slide_switch is None:
+            return False
         return self.slide_switch.value
 ## (end of Buttons section)
 ##################################################################
@@ -601,7 +659,10 @@ class BluetoothModule:
         self.advertisement = ProvideServicesAdvertisement(self.uart_server)
         self.was_connected = False
         self.radio.start_advertising(self.advertisement)
-        self.small_led = digitalio.DigitalInOut(board.D13)
+        if is_feather:
+            self.small_led = digitalio.DigitalInOut(board.D3)
+        else:
+            self.small_led = digitalio.DigitalInOut(board.D13)
         self.small_led.direction = digitalio.Direction.OUTPUT
 
     def periodic_update(self, cc, buttons):
@@ -668,10 +729,12 @@ print('////1201///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class NeopixelModule:
     def __init__(self):
-        self.pixels = neopixel.NeoPixel(board.NEOPIXEL, 10,
+        self.num_pixels = 1 if is_feather else 10
+        self.pixels = neopixel.NeoPixel(board.NEOPIXEL, self.num_pixels,
                                         brightness=0.2, auto_write=False)
         self.pixels_need_update = True
         self.current_displayed_count = -1
+        self.current_displayed_home_count = -1
 
     def periodic_update(self, cc, buttons):
         if cc.is_low_power:
@@ -680,17 +743,23 @@ class NeopixelModule:
         # One light for each encounter still active as of a minute ago
         t = time.monotonic()
         count_to_display = 0
+        home_count_to_display = 0
         for enc in cc.current_encounters.values():
             if t - enc.last_seen < 60:
                 count_to_display += 1
+                if enc.is_home_device:
+                    home_count_to_display += 1
 
-        if count_to_display != self.current_displayed_count:
+        if count_to_display != self.current_displayed_count or home_count_to_display != self.current_displayed_home_count:
             self.pixels_need_update = True
 
         if self.pixels_need_update:
             self.current_displayed_count = count_to_display
-            for i in range(10):
-                if i < self.current_displayed_count:
+            self.current_displayed_home_count = home_count_to_display
+            for i in range(self.num_pixels):
+                if i < self.current_displayed_home_count:
+                    self.pixels[i] = (0,16,32)
+                elif i < self.current_displayed_count:
                     self.pixels[i] = self.colorwheel255(100 - i * 10)
                 else:
                     self.pixels[i] = (0,0,0)
@@ -704,7 +773,7 @@ class NeopixelModule:
             self.pixels_need_update = True
 
     def set_all(self, color):
-        for i in range(10):
+        for i in range(self.num_pixels):
             self.pixels[i] = color
         self.pixels.show()
 
@@ -730,7 +799,12 @@ class NeopixelModule:
 ## EInk section: If you're not using EInk,
 ##               you can just delete this whole section
 print('////1300///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
-from adafruit_epd.il0373 import Adafruit_IL0373
+if is_feather:
+    from adafruit_epd.ssd1675 import Adafruit_SSD1675
+    eink_type = Adafruit_SSD1675
+else:
+    from adafruit_epd.il0373 import Adafruit_IL0373
+    eink_type = Adafruit_IL0373
 print('////1301///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 from adafruit_epd.epd import Adafruit_EPD
 print('////1302///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
@@ -793,14 +867,19 @@ font_motor = {'width':24,
 print('////1400///// MEMCHECK: {}k'.format(int(gc.mem_free() // 1024)))
 
 class EInkModule:
-    def __init__(self):
-        self.width = 152
-        self.height = 152
-        self.eink_needs_update = True
-        self.dirty_rect = [0, 0, self.width, self.height]
-#        self.dirty_rect = None
+    def __init__(self, cc):
+        if is_feather:
+            self.width = 250
+            self.height = 122
+        else:
+            self.width = 152
+            self.height = 152
+        self.dirty_rects = [(0, 0, self.width, self.height)]
+        self.dials_displayed = [0,0,0]
+        self.dials_src = ('5min', '30min', '2hour')
+        self.dials_pos = ((0,85),(52,104),(104,85))
+        self.next_dirty_update_time = time.monotonic()
         self.min_update_time = 15.0
-        self.last_update_time = None
         self.displayed_unique_contacts = -1
         self.displaying_low_batt_warning = False
         self.spi = busio.SPI(board.SCL, MOSI=board.SDA)
@@ -809,25 +888,31 @@ class EInkModule:
         self.sramcs_pin = None # None to use internal memory
         self.rst_pin    = digitalio.DigitalInOut(board.A3)
         self.busy_pin   = None
-        self.display = EInkOverride(self.width, self.height, self.spi,
-                                    cs_pin=self.cs_pin, dc_pin=self.dc_pin,
-                                    sramcs_pin=self.sramcs_pin,
-                                    rst_pin=self.rst_pin, busy_pin=self.busy_pin)
+        if is_feather:
+            self.display = Adafruit_SSD1675(self.width, self.height, self.spi,
+                                        cs_pin=self.cs_pin, dc_pin=self.dc_pin,
+                                        sramcs_pin=self.sramcs_pin,
+                                        rst_pin=self.rst_pin, busy_pin=self.busy_pin)
+        else:
+            self.display = EInkOverride(self.width, self.height, self.spi,
+                                        cs_pin=self.cs_pin, dc_pin=self.dc_pin,
+                                        sramcs_pin=self.sramcs_pin,
+                                        rst_pin=self.rst_pin, busy_pin=self.busy_pin)
+        self.framebuf = [self.display._buffer1, self.display._buffer2]
+        self.draw_everything(cc)
 
     def periodic_update(self, cc, buttons):
+        if not is_feather:
+            self.check_low_battery_warning(cc)
+        self.draw_dials(cc, force=False)
         num_unique = cc.get_total_unique()
         if num_unique != self.displayed_unique_contacts:
-            self.eink_needs_update = True;
-        update_time_ok = self.last_update_time is None or \
-                         time.monotonic() - self.last_update_time > self.min_update_time
-
-        self.check_low_battery_warning(cc)
-
-        if self.eink_needs_update and update_time_ok:
-            self.displayed_unique_contacts = num_unique
-            self.draw_everything(cc)
-            self.eink_needs_update = False
-            self.last_update_time = time.monotonic()
+            if num_unique < self.displayed_unique_contacts:
+                self.draw_everything(cc)
+            else:
+                self.draw_big_number(num_unique, do_clear=True)
+                self.draw_big_number(num_unique, do_clear=False)
+        self.update_dirty_rects()
 
     def check_low_battery_warning(self, cc):
         low_batt = self.display.check_low_battery_warning()
@@ -840,7 +925,6 @@ class EInkModule:
             if low_batt:
                 time.sleep(15)
 
-
     def set_low_power(self, low_power):
         if low_power:
             self.min_update_time = 60 * 5
@@ -849,7 +933,6 @@ class EInkModule:
             self.display.power_down()
         else:
             self.min_update_time = 15.0
-            self.eink_needs_update = True
         # Show the icon
         message = 'BATT SAVER MODE' if low_power else '               '
         self.draw_tiny_text((24, 36, message))
@@ -862,75 +945,114 @@ class EInkModule:
         d = self.display
         d.fill_rect(x, y, w, h, Adafruit_EPD.WHITE)
         d.text(message, x, y, Adafruit_EPD.BLACK)
-        d.set_window((x,y,w,h))
+        if not is_feather:
+            d.set_window((x,y,w,h))
         d.display()
+
+    def draw_backdrop(self):
+        with open('images/backdrop2.tsu', 'rb') as f:
+            num_bytes = (self.width >> 3) * self.height
+            f.readinto(self.framebuf[0], num_bytes)
+            f.readinto(self.framebuf[1], num_bytes)
+
+    def draw_dial(self, x, y, num_tics):
+        if num_tics > 0:
+            if num_tics > 12:
+                num_tics = 12
+            filename = 'images/tics_a{}.tsu'.format(num_tics)
+            w = h = 48
+            self.add_dirty_rect((x, y, w, h))
+            img = [0,0]
+            shift = x & 7
+            with open(filename, 'rb') as f:
+                num_bytes = (w >> 3) * h
+                img = [f.read(num_bytes), f.read(num_bytes)]
+            src_rowbytes = w >> 3
+            dst_rowbytes = self.width >> 3
+            for i in range(2):
+                src = img[i]
+                dst = self.framebuf[i]
+                src_row = 0
+                dst_row = (x >> 3) + dst_rowbytes * y
+                tail = 0xff
+                for ry in range(h):
+                    if shift:
+                        for rx in range(src_rowbytes):
+                            sp = ~src[src_row + rx]
+                            head = ~(sp >> shift) | (0xff << (8 - shift))
+                            dst[dst_row + rx] &= head & tail
+                            tail = ~(sp << (8 - shift)) & 0xff
+                        if tail != 0xff:
+                            dst[dst_row + rx] &= tail
+                    else:
+                        for rx in range(src_rowbytes):
+                            dst[dst_row + rx] &= src[src_row + rx]
+
+                    src_row += src_rowbytes
+                    dst_row += dst_rowbytes
+
+    def draw_dials(self, cc, force):
+        for i in range(len(self.dials_src)):
+            val = cc.persistent_data[self.dials_src[i]]
+            if force or val != self.dials_displayed[i]:
+                self.draw_dial(self.dials_pos[i][0], self.dials_pos[i][1], val)
+                self.dials_displayed[i] = val
 
     def draw_everything(self, cc):
         # draw stuff here
+        self.draw_backdrop()
+        if cc.history_bar:
+            cc.history_bar.draw(self)
+        num_unique = cc.get_total_unique()
+        self.draw_big_number(num_unique, do_clear=False)
+        self.draw_dials(cc, force=True)
+        self.dirty_rects = []
         d = self.display
-
-        print("Clear buffer")
-        d.fill(Adafruit_EPD.WHITE)
-        d.pixel(10, 100, Adafruit_EPD.BLACK)
-
-        print("Draw Rectangles")
-        d.fill_rect(5, 5, 10, 10, Adafruit_EPD.RED)
-        d.rect(0, 0, 20, 30, Adafruit_EPD.BLACK)
-
-        print("Draw lines")
-        d.line(0, 0, d.width - 1, d.height - 1, Adafruit_EPD.BLACK)
-        d.line(0, d.height - 1, d.width - 1, 0, Adafruit_EPD.RED)
-
-        # print("Draw text")
-        # out_text = '{}'.format(self.displayed_unique_contacts)
-        # x = 25
-        # y = 70
-        # w = 8 * len(out_text)
-        # h = 12
-        # d.text(out_text, x, y, Adafruit_EPD.BLACK)
-        # self.add_dirty_rect([x, y, w, h])
-
-        print('draw big number')
-        self.draw_big_number(self.displayed_unique_contacts, 76, 76, font_motor, do_clear=True)
-        self.draw_big_number(self.displayed_unique_contacts, 76, 76, font_motor, do_clear=False)
-
-        if self.dirty_rect:
-            d.set_window(self.dirty_rect)
-            d.display()
-            self.dirty_rect = None
-            if cc.is_low_power:
-                d.busy_wait()
-                time.sleep(0.2)
-                d.power_down()
+        d.set_window((0, 0, self.width, self.height))
+        d.display()
         print('draw done')
 
     def add_dirty_rect(self, r):
-        if self.dirty_rect is None:
-            ox1,oy1,ox2,oy2 = (self.width, self.height, 0, 0)
-        else:
-            ox1,oy1,ox2,oy2 = self.dirty_rect
-            ox2 += ox1
-            oy2 += oy1
-        nx1,ny1,nx2,ny2 = r
-        nx2 += nx1
-        ny2 += ny1
-        nx1 =  min(nx1, ox1) & 0xf8
-        ny1 =  min(ny1, oy1)
-        nx2 = (max(nx2, ox2) + 0x07) & 0xf8
-        ny2 =  max(ny2, oy2)
-        self.dirty_rect = [nx1, ny1, nx2 - nx1, ny2 - ny1]
+        if not r in self.dirty_rects:
+            self.dirty_rects.append(r)
 
-    def draw_big_number(self, val, x, y, font, do_clear=False):
+    def update_dirty_rects(self):
+        if self.dirty_rects:
+            now_time = time.monotonic()
+            if now_time >= self.next_dirty_update_time:
+                self.next_dirty_update_time = now_time + self.min_update_time
+                d = self.display
+                if not is_feather:
+                    d.set_window(self.dirty_rects.pop(0))
+                d.display()
+
+    def draw_big_number(self, val, do_clear=False):
+        self.displayed_unique_contacts = val
+        x = 76
+        y = 74
+        font = font_motor
         x_step = 22-3
         y_size = 20
         text = '{}'.format(val)
         total_width = x_step * len(text)
         x -= total_width >> 1 # center it
         y -= y_size >> 1 # center it
+
+        self.add_dirty_rect((x, y, total_width, y_size))
+
         for c in text:
             offset = font['offsets'][c]
             self.draw_simple_image(font, x, y, invert_bits=True, do_clear=do_clear, row_start=offset[0], h=offset[1])
             x += x_step
+
+    def draw_fullscreen_from_file(self, filename):
+        try:
+            fsize = get_file_size(filename)
+            with open(self.filename,'rb') as f:
+                f.readinto(xxxxx)
+        except Exception as ex:
+            btprint('Unable to load bloom file, creating new: {}'.format(ex))
+
 
     def draw_simple_image(self, image_data, x, y, invert_bits=False, do_clear=True, row_start=0, h=None):
         bp = image_data['black_pixels']
@@ -938,7 +1060,6 @@ class EInkModule:
         if h is None:
             h = image_data['height']
         row_bytes = w >> 3
-        self.add_dirty_rect([x, y, w, h])
 #        print('len(bp)', len(bp))
         index = row_start * row_bytes
         for row in range(h):
@@ -986,7 +1107,7 @@ _IL0373_PARTIAL_OUT = const(0x92)
 
 _IL0373_LOW_POWER_DETECT = const(0x51)
 
-class EInkOverride(Adafruit_IL0373):
+class EInkOverride(eink_type):
     def __init__(self, width, height, spi, cs_pin, dc_pin,
                  sramcs_pin, rst_pin, busy_pin):
         self.window_rect = None
